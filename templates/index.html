@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Solicitador de Mobilizações</title>
+    <!-- Bootstrap 5 CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            background-color: #f8f9fa;
+            padding-top: 50px;
+        }
+        h4 {
+            font-weight: bold;
+            text-align: center;
+        }
+        .card {
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        #logArea {
+            background-color: #212529;
+            color: #00ff00;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.9rem;
+            height: 300px;
+            overflow-y: auto;
+            padding: 15px;
+            border-radius: 5px;
+            white-space: pre-wrap;
+        }
+        .spinner-border {
+            display: none;
+        }
+        #heartbeat-status {
+            font-size: 0.85rem;
+            font-weight: bold;
+            padding: 8px 12px;
+            border-radius: 4px;
+            background-color: #e8f5e9;
+            color: #2e7d32;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        #heartbeat-status::before {
+            content: "🫀";
+            animation: pulse 1s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="row justify-content-center">
+        <div class="col-md-8">
+            <div class="card">
+                <div class="card-header bg-primary text-white">
+                    <h4 class="mb-0">Solicitador de Mobilizações</h4>
+                </div>
+                <div class="card-body">
+                    <div id="heartbeat-status">Iniciando...</div>
+                    <p class="text-muted">Selecione o arquivo Excel e a aba correspondente para iniciar a carga de dados.</p>
+                    
+                    <form id="uploadForm" onsubmit="return false;">
+                        <div class="mb-3">
+                            <label for="excelFile" class="form-label">Arquivo Excel (.xlsx)</label>
+                            <input class="form-control" type="file" id="excelFile" accept=".xlsx" required>
+                        </div>
+
+                        <div class="mb-3">
+                            <label for="sheetName" class="form-label">Aba (Planilha)</label>
+                            <select class="form-select" id="sheetName">
+                                <option value="PESSOAS" selected>PESSOAS</option>
+                                <option value="EQUIPAMENTOS">EQUIPAMENTOS</option>
+                            </select>
+                        </div>
+
+                        <div class="d-grid gap-2">
+                            <button type="button" class="btn btn-success btn-lg" id="btnSubmit">
+                                <span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+                                <span id="btnText">Iniciar Importação</span>
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <div class="row mt-4 mb-4" id="statDashboard" style="display: none;">
+                <div class="col-4">
+                    <div class="card bg-info text-white text-center p-2">
+                        <small>Processados</small>
+                        <h4 id="totalItems" class="mb-0">0</h4>
+                    </div>
+                </div>
+                <div class="col-4">
+                    <div class="card bg-success text-white text-center p-2">
+                        <small>Sucessos</small>
+                        <h4 id="successCount" class="mb-0">0</h4>
+                    </div>
+                </div>
+                <div class="col-4">
+                    <div class="card bg-danger text-white text-center p-2">
+                        <small>Falhas</small>
+                        <h4 id="errorCount" class="mb-0">0</h4>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card mt-2">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <span>Logs de Execução</span>
+                    <div>
+                        <button class="btn btn-sm btn-outline-secondary me-2" id="btnCopyLogs">Copiar Relatório</button>
+                        <span id="connectionBadge" class="badge bg-secondary">Offline</span>
+                    </div>
+                </div>
+                <div class="card-body p-0">
+                    <div id="logArea">Aguardando início...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Bootstrap JS Bundle -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
+<script>
+    // Sistema de Heartbeat para monitorar se a página está aberta
+    class PageHeartbeat {
+        constructor(sessionIdPrefix = 'page_session') {
+            this.sessionId = `${sessionIdPrefix}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+            this.heartbeatInterval = 2000; // 2 segundos conforme solicitado
+            this.beatCount = 0;
+            this.init();
+        }
+
+        async init() {
+            this.heartbeatTimer = setInterval(() => this.sendHeartbeat(), this.heartbeatInterval);
+            setTimeout(() => this.sendHeartbeat(), 500);
+            window.addEventListener('beforeunload', () => this.onPageUnload());
+            window.addEventListener('unload', () => this.onPageUnload());
+            this.statusCheckTimer = setInterval(() => this.checkStatus(), 10000);
+        }
+
+        async sendHeartbeat() {
+            try {
+                const response = await fetch('/heartbeat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session_id: this.sessionId })
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    this.beatCount++;
+                    this.updateStatusDisplay(data.active_sessions, true);
+                } else {
+                    this.updateStatusDisplay(0, false);
+                }
+            } catch (error) {
+                this.updateStatusDisplay(0, false);
+            }
+        }
+
+        async checkStatus() {
+            try {
+                const response = await fetch('/sessions/active-count');
+                if (response.ok) {
+                    const data = await response.json();
+                    this.updateStatusDisplay(data.active_count, true);
+                }
+            } catch (error) {
+                this.updateStatusDisplay(0, false);
+            }
+        }
+
+        updateStatusDisplay(count, isOnline) {
+            const statusElement = document.getElementById('heartbeat-status');
+            const badge = document.getElementById('connectionBadge');
+            
+            if (statusElement) {
+                statusElement.textContent = `Página Status: ${isOnline ? 'Ativa' : 'Desconectada'} (${count} aberta${count !== 1 ? 's' : ''})`;
+            }
+            if (badge) {
+                badge.textContent = isOnline ? 'Online' : 'Offline';
+                badge.className = `badge ${isOnline ? 'bg-success' : 'bg-danger'}`;
+            }
+        }
+
+        onPageUnload() {
+            clearInterval(this.heartbeatTimer);
+            clearInterval(this.statusCheckTimer);
+            
+            // Tenta avisar ao servidor para encerrar mais rápido (Logout Instantâneo)
+            if (this.sessionId) {
+                fetch('/heartbeat/logout', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session_id: this.sessionId }),
+                    keepalive: true // Permite que a requisição sobreviva ao fechamento da página
+                }).catch(() => {});
+            }
+        }
+
+        getBeatCount() { return this.beatCount; }
+        getSessionId() { return this.sessionId; }
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+        const pageHeartbeat = new PageHeartbeat();
+        const logArea = document.getElementById('logArea');
+        const form = document.getElementById('uploadForm');
+        const btnSubmit = document.getElementById('btnSubmit');
+        const btnText = document.getElementById('btnText');
+        const spinner = document.querySelector('.spinner-border');
+        const statDashboard = document.getElementById('statDashboard');
+        const btnCopyLogs = document.getElementById('btnCopyLogs');
+        
+        const totalItemsEl = document.getElementById('totalItems');
+        const successCountEl = document.getElementById('successCount');
+        const errorCountEl = document.getElementById('errorCount');
+
+        // Lógica de cópia de logs
+        btnCopyLogs.addEventListener('click', () => {
+            const text = logArea.innerText;
+            navigator.clipboard.writeText(text).then(() => {
+                const originalText = btnCopyLogs.textContent;
+                btnCopyLogs.textContent = 'Copiado!';
+                setTimeout(() => btnCopyLogs.textContent = originalText, 2000);
+            });
+        });
+
+        let total = 0;
+        let success = 0;
+        let errors = 0;
+
+        const resetStats = () => {
+            total = 0;
+            success = 0;
+            errors = 0;
+            updateStatsUI();
+            statDashboard.style.display = 'flex';
+        };
+
+        const updateStatsUI = () => {
+            totalItemsEl.textContent = total;
+            successCountEl.textContent = success;
+            errorCountEl.textContent = errors;
+        };
+
+        const handleSubmit = async (event) => {
+            event.preventDefault();
+            
+            const fileInput = document.getElementById('excelFile');
+            const sheetSelect = document.getElementById('sheetName');
+            
+            if (!fileInput.files[0]) {
+                alert("Por favor, selecione um arquivo.");
+                return;
+            }
+
+            // UI Loading State
+            resetStats();
+            btnSubmit.disabled = true;
+            spinner.style.display = 'inline-block';
+            btnText.textContent = 'Processando...';
+            logArea.textContent = '🚀 Iniciando processamento...\n';
+
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+            formData.append('sheet', sheetSelect.value);
+
+            try {
+                const response = await fetch('/run-script', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let accumulatedText = "";
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    
+                    const chunk = decoder.decode(value);
+                    accumulatedText += chunk;
+                    
+                    // Detectar resultados nas linhas
+                    if (chunk.includes("--- RESULT: SUCCESS ---")) {
+                        total++;
+                        success++;
+                        updateStatsUI();
+                    }
+                    if (chunk.includes("--- RESULT: ERROR ---")) {
+                        total++;
+                        errors++;
+                        updateStatsUI();
+                    }
+
+                    // Limpar logs técnicos para o usuário
+                    let cleanChunk = chunk
+                        .replace(/--- RESULT: SUCCESS ---/g, "✅ Linha processada com sucesso.")
+                        .replace(/--- RESULT: ERROR ---/g, "❌ Erro ao processar linha.")
+                        .replace(/=== FINAL SUMMARY ===/g, "\n✨ RESUMO FINAL:");
+
+                    logArea.textContent += cleanChunk;
+                    logArea.scrollTop = logArea.scrollHeight;
+                }
+
+            } catch (error) {
+                logArea.textContent += `\n[ERRO CRÍTICO]: ${error.message}`;
+            } finally {
+                btnSubmit.disabled = false;
+                spinner.style.display = 'none';
+                btnText.textContent = 'Iniciar Importação';
+            }
+        };
+
+        btnSubmit.addEventListener('click', handleSubmit);
+        form?.addEventListener('submit', handleSubmit);
+    });
+</script>
+
+</body>
+</html>
