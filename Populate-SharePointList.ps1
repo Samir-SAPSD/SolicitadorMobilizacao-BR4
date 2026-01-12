@@ -35,7 +35,27 @@ if (-not (Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyCo
 # Verifica se o módulo PnP.PowerShell está instalado
 if (-not (Get-Module -ListAvailable -Name PnP.PowerShell)) {
     Write-Warning "O módulo PnP.PowerShell não foi encontrado. Tentando instalar..."
-    Install-Module -Name PnP.PowerShell -Scope CurrentUser -Force -AllowClobber
+    try {
+        # Tenta confiar no repositório PSGallery
+        Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+        
+        Install-Module -Name PnP.PowerShell -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+    }
+    catch {
+        Write-Error "ERRO CRÍTICO: Não foi possível instalar o módulo PnP.PowerShell. Detalhes: $_"
+        Write-Host "Tente rodar o seguinte comando manualmente como Administrador:" -ForegroundColor Yellow
+        Write-Host "Install-Module -Name PnP.PowerShell -Scope CurrentUser -Force" -ForegroundColor Yellow
+        exit
+    }
+}
+
+# Tenta importar o módulo explicitamente para garantir que os cmdlets estejam disponíveis
+try {
+    Import-Module PnP.PowerShell -ErrorAction Stop
+}
+catch {
+    Write-Error "ERRO CRÍTICO: O módulo PnP.PowerShell foi instalado mas não pôde ser importado. Detalhes: $_"
+    exit
 }
 
 # Conectar ao SharePoint
