@@ -37,15 +37,15 @@ def check_and_shutdown_if_needed():
     for session_id, session_data in list(ACTIVE_SESSIONS.items()):
         if (now - session_data['last_heartbeat']).total_seconds() > HEARTBEAT_TIMEOUT:
             del ACTIVE_SESSIONS[session_id]
-            print(f"[{now.strftime('%H:%M:%S')}] ❌ Sessão expirada/fechada: {session_id}")
+            print(f"[{now.strftime('%H:%M:%S')}] Sessão expirada/fechada: {session_id}")
     
     # Log de estado atual
     if len(ACTIVE_SESSIONS) > 0:
-        print(f"[{now.strftime('%H:%M:%S')}] 💓 Heartbeat OK - {len(ACTIVE_SESSIONS)} sessões ativas.")
+        print(f"[{now.strftime('%H:%M:%S')}] Heartbeat OK - {len(ACTIVE_SESSIONS)} sessões ativas.")
     
     # Se já houve sessões registradas e agora não há nenhuma, encerra o servidor
     if SESSIONS_EVER_EXISTED and len(ACTIVE_SESSIONS) == 0:
-        print(f"\n[{now.strftime('%H:%M:%S')}] 🛑 Sem sessões ativas (Navegador fechado) - Encerrando servidor em 1s...\n")
+        print(f"\n[{now.strftime('%H:%M:%S')}] Sem sessões ativas (Navegador fechado) - Encerrando servidor em 1s...\n")
         # Usar threading para não bloquear a resposta
         threading.Thread(target=lambda: (time.sleep(1), os.kill(os.getpid(), 15)), daemon=True).start()
 

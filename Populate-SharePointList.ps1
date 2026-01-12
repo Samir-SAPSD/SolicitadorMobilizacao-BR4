@@ -23,6 +23,15 @@ if (-not $ListId) {
     exit
 }
 
+# Configura TLS 1.2 (necessário para PSGallery)
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
+# Verifica/Instala o provedor NuGet antes de tentar instalar módulos
+if (-not (Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue)) {
+    Write-Warning "Instalando provedor NuGet..."
+    Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force
+}
+
 # Verifica se o módulo PnP.PowerShell está instalado
 if (-not (Get-Module -ListAvailable -Name PnP.PowerShell)) {
     Write-Warning "O módulo PnP.PowerShell não foi encontrado. Tentando instalar..."
@@ -168,9 +177,9 @@ foreach ($Row in $ItensParaAdicionar) {
                                         $foundId = $foundItem.Id
                                         $LookupCache[$cacheKey] = $foundId
                                         $ItemValues[$realColName] = $foundId
-                                        Write-Host " [OK ID: $foundId]" -ForegroundColor Green
+                                        # Write-Host " [OK ID: $foundId]" -ForegroundColor Green
                                     } else {
-                                        Write-Host " [Não encontrado]" -ForegroundColor Red
+                                        Write-Host " [Parque não encontrado]" -ForegroundColor Red
                                     }
                                 } catch {
                                     Write-Host " [Erro]" -ForegroundColor Red

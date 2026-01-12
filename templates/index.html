@@ -271,7 +271,7 @@
             btnSubmit.disabled = true;
             spinner.style.display = 'inline-block';
             btnText.textContent = 'Processando...';
-            logArea.textContent = '🚀 Iniciando processamento...\n';
+            logArea.textContent = 'Iniciando processamento...\n';
 
             const formData = new FormData();
             formData.append('file', fileInput.files[0]);
@@ -310,7 +310,7 @@
                     let cleanChunk = chunk
                         .replace(/--- RESULT: SUCCESS ---/g, "✅ Linha processada com sucesso.")
                         .replace(/--- RESULT: ERROR ---/g, "❌ Erro ao processar linha.")
-                        .replace(/=== FINAL SUMMARY ===/g, "\n✨ RESUMO FINAL:");
+                        .replace(/=== FINAL SUMMARY ===/g, "\n RESUMO FINAL:");
 
                     logArea.textContent += cleanChunk;
                     logArea.scrollTop = logArea.scrollHeight;
