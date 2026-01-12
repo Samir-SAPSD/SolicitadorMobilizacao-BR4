@@ -32,34 +32,10 @@ if (-not (Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyCo
     Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force
 }
 
-# Lógica de Versão PnP: Windows PowerShell 5.1 não é mais recomendado.
+# Lógica de Versão PnP: Windows PowerShell 5.1 detectado.
 $TargetPnPVersion = $null
 if ($PSVersionTable.PSVersion.Major -lt 7) {
     Write-Warning "Ambiente: Windows PowerShell 5.1 detectado."
-    
-    # Prioridade: Tentar atualizar para PowerShell 7 via Winget
-    if (Get-Command winget -ErrorAction SilentlyContinue) {
-        Write-Host "`n[ATUALIZAÇÃO PRIORITÁRIA]" -ForegroundColor Cyan
-        Write-Host "O módulo PnP.PowerShell mais recente requer PowerShell 7."
-        Write-Host "Tentando instalar PowerShell 7 automaticamente via Winget..." -ForegroundColor Cyan
-        
-        try {
-            $wingetProcess = Start-Process -FilePath "winget" -ArgumentList "install --id Microsoft.PowerShell --source winget --accept-package-agreements --accept-source-agreements" -PassThru -Wait -NoNewWindow
-            
-            if ($wingetProcess.ExitCode -eq 0) {
-                Write-Host "`n[SUCESSO]" -ForegroundColor Green
-                Write-Host "PowerShell 7 instalado com sucesso!"
-                Write-Host "POR FAVOR: Feche esta janela e abra o 'PowerShell 7' (ícone cinza/preto) para rodar o script." -ForegroundColor Yellow
-                exit
-            } else {
-                Write-Warning "A instalação via Winget não retornou sucesso (Código: $($wingetProcess.ExitCode)). Tentando modo de compatibilidade..."
-            }
-        }
-        catch {
-            Write-Warning "Erro ao executar Winget: $_. Tentando modo de compatibilidade..."
-        }
-    }
-
     Write-Warning "Forçando uso da versão legacy 1.12.0 do PnP.PowerShell (versões 2.0+ requerem PowerShell 7)."
     $TargetPnPVersion = "1.12.0"
 }
@@ -166,58 +142,108 @@ $ExcelFilePath = $ExcelPath # Caminho recebido via parâmetro
 # Se o parâmetro SheetName vier vazio, define padrão
 if ([string]::IsNullOrWhiteSpace($SheetName)) { $SheetName = "PESSOAS" }
 
-# Verifica se o módulo Import-Excel está instalado
-if (-not (Get-Module -ListAvailable -Name Import-Excel)) {
-    Write-Warning "O módulo Import-Excel não foi encontrado. Tentando instalar..."
-    try {
-        Install-Module -Name Import-Excel -Scope CurrentUser -Force -ErrorAction Stop
-        Import-Module Import-Excel -ErrorAction Stop
-        Write-Host "Módulo Import-Excel instalado com sucesso!" -ForegroundColor Green
-    }
-    catch {
-        Write-Error "Falha ao instalar o módulo Import-Excel: $_"
-        exit
-    }
-} else {
-   # Garante que está importado na sessão
-   if (-not (Get-Module -Name Import-Excel)) {
-       Import-Module Import-Excel -ErrorAction SilentlyContinue
-   }
-}
-
 # Ler dados do Excel
 if (Test-Path $ExcelFilePath) {
     Write-Host "Lendo arquivo Excel: $ExcelFilePath (Aba: $SheetName)" -ForegroundColor Cyan
+    $ItensParaAdicionar = @()
+    $readSuccess = $false
+
+    # 1. TENTATIVA PRIORITÁRIA: VIA COM (EXCEL INSTALADO)
     try {
-        $ItensParaAdicionar = Import-Excel -Path $ExcelFilePath -WorksheetName $SheetName -ErrorAction Stop
+        Write-Host "Tentando leitura via Excel COM..." -ForegroundColor Gray
+        $excel = New-Object -ComObject Excel.Application -ErrorAction Stop
+        $excel.Visible = $false
+        $excel.DisplayAlerts = $false
         
-        # Validação extra: Se retornou nulo, pode ser que a aba esteja vazia ou nome errado
-        if (-not $ItensParaAdicionar) {
-             # Tenta listar as abas disponíveis para ajudar no debug
-             $excelObj = New-Object -ComObject Excel.Application -ErrorAction SilentlyContinue
-             if ($excelObj) {
-                 # Apenas fallback se tiver Excel instalado (raro em servidor), mas Import-Excel não precisa
-                 # Nada a fazer aqui, Import-Excel já deve ter falhado se a aba não existe
-             }
-             Write-Warning "Nenhum dado encontrado na aba '$SheetName'. Verifique se a aba contém dados e cabeçalhos."
+        $workbook = $excel.Workbooks.Open((Resolve-Path $ExcelFilePath).Path)
+        
+        try {
+            $worksheet = $workbook.Worksheets.Item($SheetName)
+        } catch {
+            $allSheets = foreach($s in $workbook.Worksheets) { $s.Name }
+            throw "Aba '$SheetName' não encontrada. Abas disponíveis: $($allSheets -join ', ')"
         }
+
+        $usedRange = $worksheet.UsedRange
+        $rowCount = $usedRange.Rows.Count
+        $colCount = $usedRange.Columns.Count
+        
+        if ($rowCount -lt 2) { throw "Planilha vazia ou apenas cabeçalho." }
+
+        $valueArray = $usedRange.Value2
+        $headers = @()
+        for ($c = 1; $c -le $colCount; $c++) {
+            $headers += $valueArray[1, $c]
+        }
+
+        for ($r = 2; $r -le $rowCount; $r++) {
+            $obj = New-Object PSCustomObject
+            $hasData = $false
+            for ($c = 1; $c -le $colCount; $c++) {
+                $val = $valueArray[$r, $c]
+                if (-not [string]::IsNullOrWhiteSpace($val)) {
+                        $val = "$val"
+                        $header = $headers[$c-1]
+                        if (-not [string]::IsNullOrWhiteSpace($header)) {
+                        $obj | Add-Member -MemberType NoteProperty -Name $header -Value $val -Force
+                        $hasData = $true
+                        }
+                }
+            }
+            if ($hasData) { $ItensParaAdicionar += $obj }
+        }
+        
+        Write-Host "Leitura via COM bem sucedida! Itens: $($ItensParaAdicionar.Count)" -ForegroundColor Green
+        $readSuccess = $true
+        
+        $workbook.Close($false)
+        $excel.Quit()
+        [System.Runtime.Interopservices.Marshal]::ReleaseComObject($excel) | Out-Null
     }
     catch {
-        Write-Error "ERRO AO LER EXCEL: $_"
-        Write-Host "Detalhes do Erro:" -ForegroundColor Yellow
-        Write-Host $_.Exception.Message -ForegroundColor Gray
-        
-        # Dica de Debug
-        if ($_.Exception.Message -match "Worksheet .* does not exist") {
-            try {
-                $pkg = Open-ExcelPackage -Path $ExcelFilePath
-                $sheets = $pkg.Workbook.Worksheets.Name
-                Write-Host "Abas disponíveis no arquivo: $($sheets -join ', ')" -ForegroundColor Cyan
-                Close-ExcelPackage $pkg
-            } catch {}
-            Write-Host "Verifique se o nome da aba '$SheetName' está correto." -ForegroundColor Yellow
+        Write-Warning "Falha na leitura via COM ($($_.Exception.Message))."
+        if ($excel) { 
+            $excel.Quit() 
+            [System.Runtime.Interopservices.Marshal]::ReleaseComObject($excel) | Out-Null
         }
-        exit
+    }
+
+    # 2. TENTATIVA SECUNDÁRIA: INSTALAR/USAR IMPORT-EXCEL
+    if (-not $readSuccess) {
+        Write-Warning "Tentando fallback para módulo Import-Excel..."
+
+        # Verifica/Instala Import-Excel apenas se necessário
+        if (-not (Get-Module -ListAvailable -Name Import-Excel)) {
+            Write-Warning "O módulo Import-Excel não foi encontrado. Tentando instalar..."
+            [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+            
+            try {
+                Install-Module -Name Import-Excel -Repository PSGallery -Scope CurrentUser -Force -ErrorAction Stop
+                Import-Module Import-Excel -ErrorAction Stop
+            }
+            catch {
+                try {
+                    if (-not (Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue)) {
+                        Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force -ErrorAction SilentlyContinue
+                    }
+                    Install-Package -Name Import-Excel -Source "https://www.powershellgallery.com/api/v2" -Scope CurrentUser -Force -ErrorAction Stop
+                } catch {
+                     Write-Error "FALHA CRÍTICA: Não foi possível instalar Import-Excel e a leitura via COM falhou."
+                     exit
+                }
+            }
+        }
+        
+        if (-not (Get-Module -Name Import-Excel)) { Import-Module Import-Excel -ErrorAction SilentlyContinue }
+
+        try {
+            $ItensParaAdicionar = Import-Excel -Path $ExcelFilePath -WorksheetName $SheetName -ErrorAction Stop
+            if (-not $ItensParaAdicionar) { Write-Warning "Nenhum dado encontrado na aba '$SheetName'." }
+            else { Write-Host "Leitura via Import-Excel bem sucedida!" -ForegroundColor Green }
+        } catch {
+            Write-Error "ERRO AO LER EXCEL: $_"
+            exit
+        }
     }
 }
 else {
@@ -298,8 +324,25 @@ foreach ($Row in $ItensParaAdicionar) {
                                 }
                             }
                         }
-                    } else {
-                        # 3. Campo comum: Mapeia para o InternalName correto
+                    } 
+                    elseif ($fieldInfo.TypeAsString -match "DateTime") {
+                        # 3. Tratamento especial para Datas (Excel via COM retorna números OLE Automation)
+                        try {
+                            if ($val -match '^\d+(\.\d+)?$') {
+                                # É um número (ex: 45302.5), converte de OADate
+                                $ItemValues[$realColName] = [DateTime]::FromOADate([double]$val)
+                            } else {
+                                # Tenta converter string de data
+                                $ItemValues[$realColName] = [DateTime]::Parse("$val")
+                            }
+                        }
+                        catch {
+                            Write-Warning "Falha ao converter data '$val' para campo '$realColName'. Enviando como string."
+                            $ItemValues[$realColName] = $val
+                        }
+                    }
+                    else {
+                        # 4. Campo comum: Mapeia para o InternalName correto
                         $ItemValues[$realColName] = $val
                     }
                 } else {
