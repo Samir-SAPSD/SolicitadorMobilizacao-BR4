@@ -32,29 +32,91 @@ if (-not (Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyCo
     Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force
 }
 
-# Verifica se o módulo PnP.PowerShell está instalado
-if (-not (Get-Module -ListAvailable -Name PnP.PowerShell)) {
-    Write-Warning "O módulo PnP.PowerShell não foi encontrado. Tentando instalar..."
+# Lógica de Versão PnP: Windows PowerShell 5.1 suporta apenas até a v1.12.0. Versões mais novas requerem PowerShell 7+.
+$TargetPnPVersion = $null
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+    Write-Warning "Ambiente: Windows PowerShell 5.1 detectado."
+    Write-Warning "Forçando uso da versão legacy 1.12.0 do PnP.PowerShell (versões 2.0+ requerem PowerShell 7)."
+    $TargetPnPVersion = "1.12.0"
+}
+
+# Verifica se a versão correta está instalada
+$IsInstalled = if ($TargetPnPVersion) {
+    Get-Module -ListAvailable -Name PnP.PowerShell | Where-Object { $_.Version -eq $TargetPnPVersion }
+} else {
+    Get-Module -ListAvailable -Name PnP.PowerShell
+}
+
+if (-not $IsInstalled) {
+    $vMsg = if ($TargetPnPVersion) { " v$TargetPnPVersion" } else { "" }
+    Write-Warning "Instalando PnP.PowerShell$vMsg..."
     try {
-        # Tenta confiar no repositório PSGallery
         Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
         
-        Install-Module -Name PnP.PowerShell -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+        $InstallArgs = @{
+            Name = "PnP.PowerShell"
+            Scope = "CurrentUser"
+            Force = $true
+            AllowClobber = $true
+            ErrorAction = "Stop"
+        }
+        if ($TargetPnPVersion) { $InstallArgs["RequiredVersion"] = $TargetPnPVersion }
+
+        Install-Module @InstallArgs
     }
     catch {
-        Write-Error "ERRO CRÍTICO: Não foi possível instalar o módulo PnP.PowerShell. Detalhes: $_"
-        Write-Host "Tente rodar o seguinte comando manualmente como Administrador:" -ForegroundColor Yellow
-        Write-Host "Install-Module -Name PnP.PowerShell -Scope CurrentUser -Force" -ForegroundColor Yellow
+        Write-Error "ERRO CRÍTICO: Não foi possível instalar o módulo. Detalhes: $_"
+        Write-Host "Execute manualmente:" -ForegroundColor Yellow
+        $cmd = "Install-Module -Name PnP.PowerShell -Scope CurrentUser -Force"
+        if ($TargetPnPVersion) { $cmd += " -RequiredVersion $TargetPnPVersion" }
+        Write-Host $cmd -ForegroundColor Yellow
         exit
     }
 }
 
-# Tenta importar o módulo explicitamente para garantir que os cmdlets estejam disponíveis
+# Importação Explícita da Versão Correta
 try {
-    Import-Module PnP.PowerShell -ErrorAction Stop
+    if ($TargetPnPVersion) {
+        # Tenta carregar a versão específica
+        Import-Module PnP.PowerShell -RequiredVersion $TargetPnPVersion -ErrorAction Stop
+    } else {
+        Import-Module PnP.PowerShell -ErrorAction Stop
+    }
 }
 catch {
-    Write-Error "ERRO CRÍTICO: O módulo PnP.PowerShell foi instalado mas não pôde ser importado. Detalhes: $_"
+    Write-Warning "Falha ao importar PnP.PowerShell. Tentativa de recuperação..."
+    
+    # Se falhar e estiver no PS 5.1, sugere/executa atualização para PowerShell 7
+    if ($PSVersionTable.PSVersion.Major -lt 7) {
+        Write-Host "`n==========================================================" -ForegroundColor Red
+        Write-Host "ERRO DE COMPATIBILIDADE DETECTADO" -ForegroundColor Red
+        Write-Host "O módulo PnP.PowerShell instalado parece incompatível com seu PowerShell 5.1." -ForegroundColor Yellow
+        Write-Host "Detalhe do erro: $_" -ForegroundColor Gray
+        Write-Host "==========================================================" -ForegroundColor Red
+        
+        Write-Host "Tentando instalar o PowerShell 7 (Core) mais recente via Winget..." -ForegroundColor Cyan
+        try {
+            if (Get-Command winget -ErrorAction SilentlyContinue) {
+                # Comando para instalar/atualizar o PowerShell
+                winget install --id Microsoft.PowerShell --source winget --accept-package-agreements --accept-source-agreements
+                
+                Write-Host "`n[AÇÃO NECESSÁRIA]" -ForegroundColor Green
+                Write-Host "1. A instalação do PowerShell 7 deve ter iniciado." -ForegroundColor Green
+                Write-Host "2. Após concluir, feche esta janela." -ForegroundColor Green
+                Write-Host "3. Abra o 'PowerShell 7' (ícone preto/cinza) no menu Iniciar." -ForegroundColor Green
+                Write-Host "4. Rode este script novamente no novo terminal." -ForegroundColor Green
+            } else {
+                Write-Error "Gerenciador de pacotes 'winget' não encontrado."
+                Write-Host "Por favor, instale o PowerShell 7 manualmente: https://aka.ms/PS7" -ForegroundColor Yellow
+            }
+        } catch {
+            Write-Error "Falha ao tentar executar o winget: $_"
+        }
+        pause
+        exit
+    }
+    
+    Write-Error "ERRO CRÍTICO: Falha ao importar PnP.PowerShell. Detalhes: $_"
     exit
 }
 
