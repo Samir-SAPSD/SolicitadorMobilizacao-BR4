@@ -3,30 +3,67 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Solicitador de Mobilizações</title>
+    <title>Solicitador de Mobilizações - Vestas</title>
     <!-- Bootstrap 5 CSS -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
+        :root {
+            --vestas-night-sky: #1F3144;
+            --vestas-blue-sky-01: #005AFF;
+            --vestas-blue-sky-02: #4BA6F7;
+            --vestas-blue-sky-03: #96C8F0;
+            --vestas-earth-green: #19736E;
+            --vestas-earth-red: #772219;
+            --vestas-earth-orange: #E17D28;
+            --vestas-light-grey: #E3E5E8;
+            --vestas-medium-grey: #A2A9B1;
+            --vestas-dark-grey: #606D7B;
+            --vestas-warm-black: #231F20;
+        }
         body {
-            background-color: #f8f9fa;
-            padding-top: 50px;
+            background: linear-gradient(135deg, var(--vestas-light-grey) 0%, #ffffff 100%);
+            min-height: 100vh;
+            padding-top: 30px;
+        }
+        .vestas-header {
+            background-color: var(--vestas-night-sky);
+            padding: 20px 0;
+            margin-bottom: 30px;
+        }
+        .vestas-logo {
+            max-height: 50px;
+            display: block;
+            margin: 0 auto;
         }
         h4 {
-            font-weight: bold;
+            font-weight: 600;
             text-align: center;
+            margin: 0;
         }
         .card {
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            box-shadow: 0 8px 24px rgba(31, 49, 68, 0.12);
+            border: none;
+            border-radius: 12px;
+            overflow: hidden;
+        }
+        .card-header.vestas-primary {
+            background-color: var(--vestas-night-sky);
+            color: #ffffff;
+            padding: 18px 24px;
+            border-bottom: 3px solid var(--vestas-blue-sky-01);
+        }
+        .card-body {
+            padding: 24px;
         }
         #logArea {
-            background-color: #212529;
-            color: #00ff00;
+            background-color: var(--vestas-night-sky);
+            color: var(--vestas-blue-sky-03);
             font-family: 'Consolas', 'Monaco', monospace;
             font-size: 0.9rem;
             height: 300px;
             overflow-y: auto;
             padding: 15px;
-            border-radius: 5px;
+            border-radius: 8px;
             white-space: pre-wrap;
         }
         .spinner-border {
@@ -34,15 +71,16 @@
         }
         #heartbeat-status {
             font-size: 0.85rem;
-            font-weight: bold;
-            padding: 8px 12px;
-            border-radius: 4px;
-            background-color: #e8f5e9;
-            color: #2e7d32;
-            margin-bottom: 15px;
+            font-weight: 600;
+            padding: 10px 14px;
+            border-radius: 8px;
+            background-color: rgba(25, 115, 110, 0.1);
+            color: var(--vestas-earth-green);
+            margin-bottom: 20px;
             display: flex;
             align-items: center;
             gap: 8px;
+            border: 1px solid rgba(25, 115, 110, 0.2);
         }
         #heartbeat-status::before {
             content: "🫀";
@@ -52,15 +90,103 @@
             0%, 100% { opacity: 1; }
             50% { opacity: 0.5; }
         }
+        .btn-vestas-primary {
+            background-color: var(--vestas-blue-sky-01);
+            border-color: var(--vestas-blue-sky-01);
+            color: #ffffff;
+            font-weight: 600;
+            padding: 12px 24px;
+            border-radius: 8px;
+            transition: all 0.3s ease;
+        }
+        .btn-vestas-primary:hover {
+            background-color: var(--vestas-night-sky);
+            border-color: var(--vestas-night-sky);
+            color: #ffffff;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(31, 49, 68, 0.3);
+        }
+        .btn-vestas-primary:disabled {
+            background-color: var(--vestas-medium-grey);
+            border-color: var(--vestas-medium-grey);
+        }
+        .form-control, .form-select {
+            border: 2px solid var(--vestas-light-grey);
+            border-radius: 8px;
+            padding: 10px 14px;
+            transition: border-color 0.3s ease;
+        }
+        .form-control:focus, .form-select:focus {
+            border-color: var(--vestas-blue-sky-01);
+            box-shadow: 0 0 0 3px rgba(0, 90, 255, 0.15);
+        }
+        .form-label {
+            font-weight: 600;
+            color: var(--vestas-night-sky);
+            margin-bottom: 8px;
+        }
+        .stat-card {
+            border-radius: 10px;
+            border: none;
+            text-align: center;
+            padding: 16px 12px;
+        }
+        .stat-card.processed {
+            background-color: var(--vestas-blue-sky-02);
+            color: #ffffff;
+        }
+        .stat-card.success {
+            background-color: var(--vestas-earth-green);
+            color: #ffffff;
+        }
+        .stat-card.error {
+            background-color: var(--vestas-earth-red);
+            color: #ffffff;
+        }
+        .stat-card small {
+            font-weight: 500;
+            opacity: 0.9;
+        }
+        .stat-card h4 {
+            font-size: 1.75rem;
+            font-weight: 700;
+        }
+        .log-header {
+            background-color: var(--vestas-light-grey);
+            color: var(--vestas-night-sky);
+            font-weight: 600;
+        }
+        .badge.online {
+            background-color: var(--vestas-earth-green) !important;
+        }
+        .badge.offline {
+            background-color: var(--vestas-earth-red) !important;
+        }
+        .text-muted {
+            color: var(--vestas-dark-grey) !important;
+        }
+        .footer-info {
+            text-align: center;
+            color: var(--vestas-medium-grey);
+            font-size: 0.8rem;
+            margin-top: 30px;
+            padding-bottom: 20px;
+        }
     </style>
 </head>
 <body>
+
+<header class="vestas-header">
+    <div class="container">
+        <img src="/static/Vestas Primary Logo RGB.png" alt="Vestas" class="vestas-logo">
+    </div>
+</header>
 
 <div class="container">
     <div class="row justify-content-center">
         <div class="col-md-8">
             <div class="card">
-                <div class="card-header bg-primary text-white">
+                <div class="card-header vestas-primary">
                     <h4 class="mb-0">Solicitador de Mobilizações</h4>
                 </div>
                 <div class="card-body">
@@ -82,7 +208,7 @@
                         </div>
 
                         <div class="d-grid gap-2">
-                            <button type="button" class="btn btn-success btn-lg" id="btnSubmit">
+                            <button type="button" class="btn btn-vestas-primary btn-lg" id="btnSubmit">
                                 <span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
                                 <span id="btnText">Iniciar Importação</span>
                             </button>
@@ -93,19 +219,19 @@
 
             <div class="row mt-4 mb-4" id="statDashboard" style="display: none;">
                 <div class="col-4">
-                    <div class="card bg-info text-white text-center p-2">
+                    <div class="card stat-card processed">
                         <small>Processados</small>
                         <h4 id="totalItems" class="mb-0">0</h4>
                     </div>
                 </div>
                 <div class="col-4">
-                    <div class="card bg-success text-white text-center p-2">
+                    <div class="card stat-card success">
                         <small>Sucessos</small>
                         <h4 id="successCount" class="mb-0">0</h4>
                     </div>
                 </div>
                 <div class="col-4">
-                    <div class="card bg-danger text-white text-center p-2">
+                    <div class="card stat-card error">
                         <small>Falhas</small>
                         <h4 id="errorCount" class="mb-0">0</h4>
                     </div>
@@ -113,16 +239,20 @@
             </div>
 
             <div class="card mt-2">
-                <div class="card-header d-flex justify-content-between align-items-center">
+                <div class="card-header log-header d-flex justify-content-between align-items-center">
                     <span>Logs de Execução</span>
                     <div>
                         <button class="btn btn-sm btn-outline-secondary me-2" id="btnCopyLogs">Copiar Relatório</button>
-                        <span id="connectionBadge" class="badge bg-secondary">Offline</span>
+                        <span id="connectionBadge" class="badge offline">Offline</span>
                     </div>
                 </div>
                 <div class="card-body p-0">
                     <div id="logArea">Aguardando início...</div>
                 </div>
+            </div>
+
+            <div class="footer-info">
+                <p class="mb-0">© Vestas Wind Systems A/S</p>
             </div>
         </div>
     </div>
@@ -190,7 +320,7 @@
             }
             if (badge) {
                 badge.textContent = isOnline ? 'Online' : 'Offline';
-                badge.className = `badge ${isOnline ? 'bg-success' : 'bg-danger'}`;
+                badge.className = `badge ${isOnline ? 'online' : 'offline'}`;
             }
         }
 
