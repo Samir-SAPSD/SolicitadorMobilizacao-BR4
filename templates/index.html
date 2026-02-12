@@ -30,10 +30,16 @@
             padding: 20px 0;
             margin-bottom: 30px;
         }
+        .logo-container {
+            display: inline-block;
+            background-color: #ffffff;
+            padding: 12px 24px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+        }
         .vestas-logo {
-            max-height: 50px;
+            max-height: 40px;
             display: block;
-            margin: 0 auto;
         }
         h4 {
             font-weight: 600;
@@ -177,8 +183,10 @@
 <body>
 
 <header class="vestas-header">
-    <div class="container">
-        <img src="/static/Vestas Primary Logo RGB.png" alt="Vestas" class="vestas-logo">
+    <div class="container text-center">
+        <div class="logo-container">
+            <img src="/static/Vestas Primary Logo RGB.png" alt="Vestas" class="vestas-logo">
+        </div>
     </div>
 </header>
 
