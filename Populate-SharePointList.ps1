@@ -7,7 +7,7 @@ param(
 )
 
 # Configurações
-$TestMode = $true # Altere para $false para usar a lista de produção
+$TestMode = $false # Altere para $false para usar a lista de produção
 $SiteUrl = "https://vestas.sharepoint.com/sites/CC-ControleService-BR"
 
 # Centralização da lista alvo (conforme solicitado, a lista é a mesma para Pessoas e Equipamentos)
