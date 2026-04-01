@@ -6,6 +6,224 @@ param(
     [string]$SheetName = "PESSOAS"
 )
 
+[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
+
+function Convert-ExcelColumnToIndex {
+    param([string]$ColumnLetters)
+    $sum = 0
+    foreach ($ch in $ColumnLetters.ToUpper().ToCharArray()) {
+        $sum = ($sum * 26) + ([int][char]$ch - [int][char]'A' + 1)
+    }
+    return $sum
+}
+
+function Get-OpenXmlCellText {
+    param(
+        [System.Xml.XmlElement]$Cell,
+        [array]$SharedStrings,
+        [System.Xml.XmlNamespaceManager]$Ns
+    )
+
+    $cellType = $Cell.GetAttribute("t")
+    $valueNode = $Cell.SelectSingleNode("x:v", $Ns)
+    $inlineNode = $Cell.SelectSingleNode("x:is/x:t", $Ns)
+
+    if ($cellType -eq "inlineStr" -and $inlineNode) {
+        return $inlineNode.InnerText
+    }
+
+    if (-not $valueNode) {
+        return $null
+    }
+
+    $raw = $valueNode.InnerText
+    if ($cellType -eq "s") {
+        $idx = 0
+        if ([int]::TryParse($raw, [ref]$idx) -and $idx -ge 0 -and $idx -lt $SharedStrings.Count) {
+            return $SharedStrings[$idx]
+        }
+        return $raw
+    }
+
+    return $raw
+}
+
+function Read-ExcelOpenXml {
+    param(
+        [string]$Path,
+        [string]$WorksheetName,
+        [bool]$IncludeEmptyColumns
+    )
+
+    Add-Type -AssemblyName System.IO.Compression
+
+    $fileStream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    $zip = New-Object System.IO.Compression.ZipArchive($fileStream, [System.IO.Compression.ZipArchiveMode]::Read, $false)
+    try {
+        $workbookEntry = $zip.GetEntry("xl/workbook.xml")
+        if (-not $workbookEntry) { throw "Arquivo workbook.xml não encontrado no xlsx." }
+
+        $relsEntry = $zip.GetEntry("xl/_rels/workbook.xml.rels")
+        if (-not $relsEntry) { throw "Arquivo workbook.xml.rels não encontrado no xlsx." }
+
+        [xml]$workbookXml = New-Object System.Xml.XmlDocument
+        $wbStream = $workbookEntry.Open()
+        try { $workbookXml.Load($wbStream) } finally { $wbStream.Dispose() }
+
+        [xml]$relsXml = New-Object System.Xml.XmlDocument
+        $relsStream = $relsEntry.Open()
+        try { $relsXml.Load($relsStream) } finally { $relsStream.Dispose() }
+
+        $wbNs = New-Object System.Xml.XmlNamespaceManager($workbookXml.NameTable)
+        $wbNs.AddNamespace("x", "http://schemas.openxmlformats.org/spreadsheetml/2006/main")
+        $wbNs.AddNamespace("r", "http://schemas.openxmlformats.org/officeDocument/2006/relationships")
+
+        $relNs = New-Object System.Xml.XmlNamespaceManager($relsXml.NameTable)
+        $relNs.AddNamespace("pr", "http://schemas.openxmlformats.org/package/2006/relationships")
+
+        $sheetNode = $workbookXml.SelectSingleNode("//x:sheets/x:sheet[@name='$WorksheetName']", $wbNs)
+        if (-not $sheetNode) {
+            $sheetNames = @()
+            $workbookXml.SelectNodes("//x:sheets/x:sheet", $wbNs) | ForEach-Object { $sheetNames += $_.GetAttribute("name") }
+            throw "Aba '$WorksheetName' não encontrada. Abas disponíveis: $($sheetNames -join ', ')"
+        }
+
+        $relId = $sheetNode.GetAttribute("id", "http://schemas.openxmlformats.org/officeDocument/2006/relationships")
+        if ([string]::IsNullOrWhiteSpace($relId)) { throw "Relacionamento da aba '$WorksheetName' não encontrado." }
+
+        $targetNode = $relsXml.SelectSingleNode("//pr:Relationship[@Id='$relId']", $relNs)
+        if (-not $targetNode) { throw "Target da aba '$WorksheetName' não encontrado em workbook.xml.rels." }
+
+        $target = $targetNode.GetAttribute("Target")
+        if ([string]::IsNullOrWhiteSpace($target)) { throw "Target da aba '$WorksheetName' vazio." }
+
+        if ($target.StartsWith("/")) {
+            $sheetPath = $target.TrimStart('/')
+        } elseif ($target.StartsWith("xl/")) {
+            $sheetPath = $target
+        } else {
+            $sheetPath = "xl/$target"
+        }
+
+        $sheetEntry = $zip.GetEntry($sheetPath)
+        if (-not $sheetEntry) { throw "Worksheet XML não encontrado: $sheetPath" }
+
+        $sharedStrings = @()
+        $ssEntry = $zip.GetEntry("xl/sharedStrings.xml")
+        if ($ssEntry) {
+            [xml]$ssXml = New-Object System.Xml.XmlDocument
+            $ssStream = $ssEntry.Open()
+            try { $ssXml.Load($ssStream) } finally { $ssStream.Dispose() }
+
+            $ssNs = New-Object System.Xml.XmlNamespaceManager($ssXml.NameTable)
+            $ssNs.AddNamespace("x", "http://schemas.openxmlformats.org/spreadsheetml/2006/main")
+
+            $ssXml.SelectNodes("//x:si", $ssNs) | ForEach-Object {
+                $parts = @()
+                $_.SelectNodes(".//x:t", $ssNs) | ForEach-Object { $parts += $_.InnerText }
+                $sharedStrings += ($parts -join "")
+            }
+        }
+
+        [xml]$sheetXml = New-Object System.Xml.XmlDocument
+        $sheetStream = $sheetEntry.Open()
+        try { $sheetXml.Load($sheetStream) } finally { $sheetStream.Dispose() }
+
+        $sheetNs = New-Object System.Xml.XmlNamespaceManager($sheetXml.NameTable)
+        $sheetNs.AddNamespace("x", "http://schemas.openxmlformats.org/spreadsheetml/2006/main")
+
+        $rows = $sheetXml.SelectNodes("//x:sheetData/x:row", $sheetNs)
+        if (-not $rows -or $rows.Count -lt 2) {
+            throw "Planilha vazia ou apenas cabeçalho."
+        }
+
+        $headerMap = @{}
+        $headerRow = $rows[0]
+        foreach ($cell in $headerRow.SelectNodes("x:c", $sheetNs)) {
+            $ref = $cell.GetAttribute("r")
+            if ($ref -match '^([A-Za-z]+)') {
+                $colIdx = Convert-ExcelColumnToIndex -ColumnLetters $matches[1]
+                $headerText = Get-OpenXmlCellText -Cell $cell -SharedStrings $sharedStrings -Ns $sheetNs
+                if (-not [string]::IsNullOrWhiteSpace("$headerText")) {
+                    $headerMap[$colIdx] = "$headerText"
+                }
+            }
+        }
+
+        $items = @()
+        for ($r = 1; $r -lt $rows.Count; $r++) {
+            $rowNode = $rows[$r]
+            $obj = New-Object PSCustomObject
+            $hasData = $false
+
+            $valueByCol = @{}
+            foreach ($cell in $rowNode.SelectNodes("x:c", $sheetNs)) {
+                $ref = $cell.GetAttribute("r")
+                if ($ref -match '^([A-Za-z]+)') {
+                    $colIdx = Convert-ExcelColumnToIndex -ColumnLetters $matches[1]
+                    $valueByCol[$colIdx] = Get-OpenXmlCellText -Cell $cell -SharedStrings $sharedStrings -Ns $sheetNs
+                }
+            }
+
+            foreach ($colIdx in ($headerMap.Keys | Sort-Object)) {
+                $header = $headerMap[$colIdx]
+                $cellValue = $null
+                if ($valueByCol.ContainsKey($colIdx)) { $cellValue = $valueByCol[$colIdx] }
+
+                if ($IncludeEmptyColumns) {
+                    $obj | Add-Member -MemberType NoteProperty -Name $header -Value $cellValue -Force
+                } elseif (-not [string]::IsNullOrWhiteSpace("$cellValue")) {
+                    $obj | Add-Member -MemberType NoteProperty -Name $header -Value "$cellValue" -Force
+                }
+
+                if (-not [string]::IsNullOrWhiteSpace("$cellValue")) {
+                    $hasData = $true
+                }
+            }
+
+            if ($hasData) {
+                $items += $obj
+            }
+        }
+
+        return $items
+    }
+    finally {
+        if ($zip) { $zip.Dispose() }
+        if ($fileStream) { $fileStream.Dispose() }
+    }
+}
+
+function Resolve-SharePointDefaultValue {
+    param(
+        $Field,
+        $DefaultValue
+    )
+
+    if ([string]::IsNullOrWhiteSpace("$DefaultValue")) {
+        return $null
+    }
+
+    if ($Field.TypeAsString -notmatch "DateTime") {
+        return $DefaultValue
+    }
+
+    $dv = ("$DefaultValue").Trim()
+    if ($dv -match '^\[today\]$' -or $dv -match '^today\(\)$' -or $dv -match '^=today\(\)$') {
+        return (Get-Date).Date
+    }
+
+    try {
+        return [DateTime]::Parse($dv)
+    }
+    catch {
+        # Default de data nao parseavel localmente: deixa o campo ausente para o SharePoint aplicar o default nativo.
+        return $null
+    }
+}
+
 # Configurações
 $TestMode = $false # Altere para $false para usar a lista de produção
 $SiteUrl = "https://vestas.sharepoint.com/sites/CC-ControleService-BR"
@@ -70,7 +288,7 @@ if (-not $IsInstalled) {
         $cmd = "Install-Module -Name PnP.PowerShell -Scope CurrentUser -Force"
         if ($TargetPnPVersion) { $cmd += " -RequiredVersion $TargetPnPVersion" }
         Write-Host $cmd -ForegroundColor Yellow
-        exit
+        exit 1
     }
 }
 
@@ -86,7 +304,7 @@ try {
 catch {
     Write-Error "ERRO CRÍTICO: Falha ao importar PnP.PowerShell. Detalhes: $_"
     Write-Host "Se você está no PowerShell 5.1 e a atualização falhou, tente instalar o PowerShell 7 manualmente: https://aka.ms/PS7" -ForegroundColor Yellow
-    exit
+    exit 1
 }
 
 # Conectar ao SharePoint
@@ -124,9 +342,21 @@ $ParqueLookupListId = "678f10f9-8d46-404b-a451-70dfe938a1ee"
 
 try {
     # Obter TODOS os campos para mapear Excel Title -> SharePoint InternalName
-    $AllFields = Get-PnPField -List $ListId | Select-Object InternalName, Title, TypeAsString, LookupList, LookupField
+    $AllFields = Get-PnPField -List $ListId | Select-Object InternalName, Title, TypeAsString, LookupList, LookupField, Required, DefaultValue
     $LookupFields = $AllFields | Where-Object { $_.TypeAsString -eq "Lookup" }
     $LookupCache = @{} # Cache: "FieldName:Value" -> ID
+    $LookupDatasetCache = @{} # Cache: "ListId|Field" -> Itens da lista de lookup
+    $LookupExactIndexCache = @{} # Cache: "ListId|Field" -> Hashtable(normalizedValue -> Id)
+    $FieldMap = @{} # Cache: lower(title|internalname) -> FieldInfo
+
+    foreach ($f in $AllFields) {
+        if (-not [string]::IsNullOrWhiteSpace("$($f.InternalName)")) {
+            $FieldMap[$f.InternalName.ToLowerInvariant()] = $f
+        }
+        if (-not [string]::IsNullOrWhiteSpace("$($f.Title)")) {
+            $FieldMap[$f.Title.ToLowerInvariant()] = $f
+        }
+    }
     
     if ($AllFields) {
         Write-Host "Campos da lista carregados: $($AllFields.Count)" -ForegroundColor Gray
@@ -148,67 +378,80 @@ if (Test-Path $ExcelFilePath) {
     $ItensParaAdicionar = @()
     $readSuccess = $false
 
-    # 1. TENTATIVA PRIORITÁRIA: VIA COM (EXCEL INSTALADO)
+    # 1. TENTATIVA PRIORITÁRIA: LEITURA OPENXML (rápido e sem dependências externas)
     try {
-        Write-Host "Tentando leitura via Excel COM..." -ForegroundColor Gray
-        $excel = New-Object -ComObject Excel.Application -ErrorAction Stop
-        $excel.Visible = $false
-        $excel.DisplayAlerts = $false
-        
-        $workbook = $excel.Workbooks.Open((Resolve-Path $ExcelFilePath).Path)
-        
+        $ItensParaAdicionar = @(Read-ExcelOpenXml -Path (Resolve-Path $ExcelFilePath).Path -WorksheetName $SheetName -IncludeEmptyColumns $false)
+        if ($ItensParaAdicionar -and $ItensParaAdicionar.Count -gt 0) {
+            Write-Host "Leitura via OpenXML bem sucedida! Itens: $($ItensParaAdicionar.Count)" -ForegroundColor Green
+            $readSuccess = $true
+        }
+    } catch {
+        Write-Warning "Falha na leitura OpenXML ($($_.Exception.Message))."
+    }
+
+    # 2. TENTATIVA SECUNDÁRIA: VIA COM (EXCEL INSTALADO)
+    if (-not $readSuccess) {
         try {
-            $worksheet = $workbook.Worksheets.Item($SheetName)
-        } catch {
-            $allSheets = foreach($s in $workbook.Worksheets) { $s.Name }
-            throw "Aba '$SheetName' não encontrada. Abas disponíveis: $($allSheets -join ', ')"
-        }
+            Write-Host "Tentando leitura via Excel COM..." -ForegroundColor Gray
+            $excel = New-Object -ComObject Excel.Application -ErrorAction Stop
+            $excel.Visible = $false
+            $excel.DisplayAlerts = $false
+            
+            $workbook = $excel.Workbooks.Open((Resolve-Path $ExcelFilePath).Path)
+            
+            try {
+                $worksheet = $workbook.Worksheets.Item($SheetName)
+            } catch {
+                $allSheets = foreach($s in $workbook.Worksheets) { $s.Name }
+                throw "Aba '$SheetName' não encontrada. Abas disponíveis: $($allSheets -join ', ')"
+            }
 
-        $usedRange = $worksheet.UsedRange
-        $rowCount = $usedRange.Rows.Count
-        $colCount = $usedRange.Columns.Count
-        
-        if ($rowCount -lt 2) { throw "Planilha vazia ou apenas cabeçalho." }
+            $usedRange = $worksheet.UsedRange
+            $rowCount = $usedRange.Rows.Count
+            $colCount = $usedRange.Columns.Count
+            
+            if ($rowCount -lt 2) { throw "Planilha vazia ou apenas cabeçalho." }
 
-        $valueArray = $usedRange.Value2
-        $headers = @()
-        for ($c = 1; $c -le $colCount; $c++) {
-            $headers += $valueArray[1, $c]
-        }
-
-        for ($r = 2; $r -le $rowCount; $r++) {
-            $obj = New-Object PSCustomObject
-            $hasData = $false
+            $valueArray = $usedRange.Value2
+            $headers = @()
             for ($c = 1; $c -le $colCount; $c++) {
-                $val = $valueArray[$r, $c]
-                if (-not [string]::IsNullOrWhiteSpace($val)) {
+                $headers += $valueArray[1, $c]
+            }
+
+            $ItensParaAdicionar = @()
+            for ($r = 2; $r -le $rowCount; $r++) {
+                $obj = New-Object PSCustomObject
+                $hasData = $false
+                for ($c = 1; $c -le $colCount; $c++) {
+                    $val = $valueArray[$r, $c]
+                    if (-not [string]::IsNullOrWhiteSpace("$val")) {
                         $val = "$val"
                         $header = $headers[$c-1]
-                        if (-not [string]::IsNullOrWhiteSpace($header)) {
-                        $obj | Add-Member -MemberType NoteProperty -Name $header -Value $val -Force
-                        $hasData = $true
+                        if (-not [string]::IsNullOrWhiteSpace("$header")) {
+                            $obj | Add-Member -MemberType NoteProperty -Name $header -Value $val -Force
+                            $hasData = $true
                         }
+                    }
                 }
+                if ($hasData) { $ItensParaAdicionar += $obj }
             }
-            if ($hasData) { $ItensParaAdicionar += $obj }
+            
+            Write-Host "Leitura via COM bem sucedida! Itens: $($ItensParaAdicionar.Count)" -ForegroundColor Green
+            $readSuccess = $true
         }
-        
-        Write-Host "Leitura via COM bem sucedida! Itens: $($ItensParaAdicionar.Count)" -ForegroundColor Green
-        $readSuccess = $true
-        
-        $workbook.Close($false)
-        $excel.Quit()
-        [System.Runtime.Interopservices.Marshal]::ReleaseComObject($excel) | Out-Null
-    }
-    catch {
-        Write-Warning "Falha na leitura via COM ($($_.Exception.Message))."
-        if ($excel) { 
-            $excel.Quit() 
-            [System.Runtime.Interopservices.Marshal]::ReleaseComObject($excel) | Out-Null
+        catch {
+            Write-Warning "Falha na leitura via COM ($($_.Exception.Message))."
+        }
+        finally {
+            try { if ($usedRange) { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($usedRange) } } catch {}
+            try { if ($worksheet) { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($worksheet) } } catch {}
+            try { if ($workbook) { $workbook.Close($false); [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($workbook) } } catch {}
+            try { if ($excel) { $excel.Quit(); [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($excel) } } catch {}
+            [GC]::Collect(); [GC]::WaitForPendingFinalizers()
         }
     }
 
-    # 2. TENTATIVA SECUNDÁRIA: INSTALAR/USAR IMPORT-EXCEL
+    # 3. TENTATIVA TERCIÁRIA: INSTALAR/USAR IMPORT-EXCEL
     if (-not $readSuccess) {
         Write-Warning "Tentando fallback para módulo Import-Excel..."
 
@@ -229,7 +472,7 @@ if (Test-Path $ExcelFilePath) {
                     Install-Package -Name Import-Excel -Source "https://www.powershellgallery.com/api/v2" -Scope CurrentUser -Force -ErrorAction Stop
                 } catch {
                      Write-Error "FALHA CRÍTICA: Não foi possível instalar Import-Excel e a leitura via COM falhou."
-                     exit
+                     exit 1
                 }
             }
         }
@@ -237,25 +480,31 @@ if (Test-Path $ExcelFilePath) {
         if (-not (Get-Module -Name Import-Excel)) { Import-Module Import-Excel -ErrorAction SilentlyContinue }
 
         try {
-            $ItensParaAdicionar = Import-Excel -Path $ExcelFilePath -WorksheetName $SheetName -ErrorAction Stop
+            $ItensParaAdicionar = @(Import-Excel -Path $ExcelFilePath -WorksheetName $SheetName -ErrorAction Stop)
             if (-not $ItensParaAdicionar) { Write-Warning "Nenhum dado encontrado na aba '$SheetName'." }
             else { Write-Host "Leitura via Import-Excel bem sucedida!" -ForegroundColor Green }
         } catch {
             Write-Error "ERRO AO LER EXCEL: $_"
-            exit
+            exit 1
         }
     }
 }
 else {
     Write-Error "Arquivo Excel não encontrado: $ExcelFilePath"
     Write-Host "Por favor, crie um arquivo Excel com as colunas correspondentes ao SharePoint (ex: Title)."
-    exit
+    exit 1
 }
 
-# Loop para adicionar os itens
+# Loop para preparar e validar os itens antes do envio (evita envio parcial)
 $ExecutionReport = @()
+$PreparedItems = @()
+$BlockingErrors = @()
+$RequiredFields = $AllFields | Where-Object { $_.Required -eq $true }
 
-foreach ($Row in $ItensParaAdicionar) {
+for ($rowIndex = 0; $rowIndex -lt $ItensParaAdicionar.Count; $rowIndex++) {
+    $Row = $ItensParaAdicionar[$rowIndex]
+    $lineNum = $rowIndex + 2 # Linha 1 = cabeçalho
+
     try {
         # Converte a linha do Excel (PSCustomObject) para Hashtable
         $ItemValues = @{}
@@ -273,9 +522,12 @@ foreach ($Row in $ItensParaAdicionar) {
             if ($null -ne $val -and "$val".Trim().Length -gt 0) {
                 
                 # 1. Identificar o campo SharePoint correto (por Title ou InternalName)
-                $fieldInfo = $AllFields | Where-Object { $_.InternalName -eq $colName -or $_.Title -eq $colName }
+                $fieldInfo = $null
+                $colNameKey = $colName.ToLowerInvariant()
+                if ($FieldMap.ContainsKey($colNameKey)) {
+                    $fieldInfo = $FieldMap[$colNameKey]
+                }
                 if ($fieldInfo) {
-                    if ($fieldInfo -is [array]) { $fieldInfo = $fieldInfo[0] }
                     $realColName = $fieldInfo.InternalName
 
                     # 2. Se for Lookup, resolve o ID
@@ -301,18 +553,40 @@ foreach ($Row in $ItensParaAdicionar) {
                                     }
 
                                     $searchVal = "$val".Trim()
-                                    $allItems = Get-PnPListItem -List $targetListId -PageSize 500 -ErrorAction SilentlyContinue
-                                    $foundItem = $null
-                                    
-                                    if ($allItems) {
-                                        $foundItem = $allItems | Where-Object { $_.FieldValues[$targetInternalField] -ieq $searchVal } | Select-Object -First 1
-                                        if (!$foundItem) {
-                                            $foundItem = $allItems | Where-Object { $_.FieldValues[$targetInternalField] -ilike "*$searchVal*" } | Select-Object -First 1
+                                    $datasetKey = "$targetListId|$targetInternalField"
+
+                                    if (-not $LookupDatasetCache.ContainsKey($datasetKey)) {
+                                        $allItems = Get-PnPListItem -List $targetListId -PageSize 2000 -ErrorAction SilentlyContinue
+                                        if (-not $allItems) { $allItems = @() }
+                                        $LookupDatasetCache[$datasetKey] = $allItems
+
+                                        $exactIndex = @{}
+                                        foreach ($li in $allItems) {
+                                            $fv = $li.FieldValues[$targetInternalField]
+                                            if ($null -ne $fv) {
+                                                $normalized = ("$fv").Trim().ToLowerInvariant()
+                                                if (-not [string]::IsNullOrWhiteSpace($normalized) -and -not $exactIndex.ContainsKey($normalized)) {
+                                                    $exactIndex[$normalized] = $li.Id
+                                                }
+                                            }
                                         }
+                                        $LookupExactIndexCache[$datasetKey] = $exactIndex
                                     }
 
-                                    if ($foundItem) {
-                                        $foundId = $foundItem.Id
+                                    $foundId = $null
+                                    $searchNorm = $searchVal.ToLowerInvariant()
+
+                                    if ($LookupExactIndexCache.ContainsKey($datasetKey) -and $LookupExactIndexCache[$datasetKey].ContainsKey($searchNorm)) {
+                                        $foundId = $LookupExactIndexCache[$datasetKey][$searchNorm]
+                                    }
+
+                                    if (-not $foundId) {
+                                        $allItems = $LookupDatasetCache[$datasetKey]
+                                        $foundItem = $allItems | Where-Object { $_.FieldValues[$targetInternalField] -ilike "*$searchVal*" } | Select-Object -First 1
+                                        if ($foundItem) { $foundId = $foundItem.Id }
+                                    }
+
+                                    if ($foundId) {
                                         $LookupCache[$cacheKey] = $foundId
                                         $ItemValues[$realColName] = $foundId
                                         # Write-Host " [OK ID: $foundId]" -ForegroundColor Green
@@ -337,8 +611,7 @@ foreach ($Row in $ItensParaAdicionar) {
                             }
                         }
                         catch {
-                            Write-Warning "Falha ao converter data '$val' para campo '$realColName'. Enviando como string."
-                            $ItemValues[$realColName] = $val
+                            $BlockingErrors += "Linha ${lineNum}: valor de data invalido para o campo '$realColName': '$val'."
                         }
                     }
                     else {
@@ -365,11 +638,72 @@ foreach ($Row in $ItensParaAdicionar) {
             }
         }
 
+        # Preencher campos obrigatórios vazios com DefaultValue do SharePoint
+        foreach ($field in $RequiredFields) {
+            $internalName = $field.InternalName
+            $defaultValue = $field.DefaultValue
+            $isEmpty = (-not $ItemValues.ContainsKey($internalName)) -or ([string]::IsNullOrWhiteSpace("" + $ItemValues[$internalName]))
+            if ($isEmpty -and -not [string]::IsNullOrWhiteSpace($defaultValue)) {
+                $resolvedDefault = Resolve-SharePointDefaultValue -Field $field -DefaultValue $defaultValue
+                if ($null -ne $resolvedDefault) {
+                    $ItemValues[$internalName] = $resolvedDefault
+                }
+            }
+        }
+
+        # Bloqueia se existir campo obrigatório sem valor e sem default
+        $missingRequired = @()
+        foreach ($field in $RequiredFields) {
+            $internalName = $field.InternalName
+            $fieldTitle = $field.Title
+            $defaultValue = $field.DefaultValue
+            $isEmpty = (-not $ItemValues.ContainsKey($internalName)) -or ([string]::IsNullOrWhiteSpace("" + $ItemValues[$internalName]))
+            $hasDefault = -not [string]::IsNullOrWhiteSpace("$defaultValue")
+
+            if ($isEmpty -and -not $hasDefault) {
+                $missingRequired += "$fieldTitle ($internalName)"
+            }
+        }
+
+        if ($missingRequired.Count -gt 0) {
+            $BlockingErrors += "Linha ${lineNum}: campos obrigatórios sem valor e sem default no SharePoint: $($missingRequired -join ', ')"
+            continue
+        }
+
         # Se não houver nenhuma coluna com dados, pula a linha
         if ($ItemValues.Count -eq 0) {
             Write-Warning "Linha sem dados encontrada no Excel. Ignorando..."
             continue
         }
+
+        $PreparedItems += [PSCustomObject]@{
+            LinhaExcel = $lineNum
+            Values = $ItemValues
+        }
+    }
+    catch {
+        $errorDetail = $_.Exception.Message
+        $BlockingErrors += "Linha ${lineNum}: erro ao preparar dados para envio: $errorDetail"
+    }
+}
+
+if ($BlockingErrors.Count -gt 0) {
+    Write-Host "" 
+    Write-Host "UPLOAD CANCELADO: Foram encontrados campos obrigatórios sem valor e sem default." -ForegroundColor Red
+    foreach ($be in $BlockingErrors) {
+        Write-Host " - $be" -ForegroundColor Red
+    }
+    exit 1
+}
+
+if ($PreparedItems.Count -eq 0) {
+    Write-Error "Nenhum item válido para envio foi preparado."
+    exit 1
+}
+
+foreach ($prepared in $PreparedItems) {
+    try {
+        $ItemValues = $prepared.Values
 
         # DEBUG: Mostrar chaves sendo enviadas (opcional)
         # Write-Host "Chaves: $($ItemValues.Keys -join ', ')" -ForegroundColor Gray
@@ -387,7 +721,7 @@ foreach ($Row in $ItensParaAdicionar) {
         if ($ItemValues.Title) { $reportTitle = $ItemValues.Title }
         
         $ExecutionReport += [PSCustomObject]@{
-            "Linha" = $ExecutionReport.Count + 1
+            "Linha" = $prepared.LinhaExcel
             "Item"  = $reportTitle
             "ID"    = $novoItem.Id
             "Status" = "Sucesso"
@@ -402,7 +736,7 @@ foreach ($Row in $ItensParaAdicionar) {
         # Adiciona ao relatório de erro
         $reportTitle = "Erro na linha"
         $ExecutionReport += [PSCustomObject]@{
-            "Linha" = $ExecutionReport.Count + 1
+            "Linha" = $prepared.LinhaExcel
             "Item"  = $reportTitle
             "ID"    = "N/A"
             "Status" = "Erro: $errorDetail"
@@ -420,3 +754,10 @@ if ($ExecutionReport) {
 
 Write-Host '=== FINAL SUMMARY ===' -ForegroundColor Cyan
 Write-Host 'Processo finalizado.' -ForegroundColor Cyan
+
+$hasUploadErrors = $ExecutionReport | Where-Object { "$($_.Status)" -like "Erro:*" } | Select-Object -First 1
+if ($hasUploadErrors) {
+    exit 1
+}
+
+exit 0

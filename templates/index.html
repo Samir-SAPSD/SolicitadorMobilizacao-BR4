@@ -178,6 +178,18 @@
             margin-top: 30px;
             padding-bottom: 20px;
         }
+        .template-actions {
+            display: flex;
+            justify-content: flex-end;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        #templateUpdateInfo {
+            font-size: 0.82rem;
+            color: var(--vestas-dark-grey);
+            min-height: 20px;
+        }
     </style>
 </head>
 <body>
@@ -201,6 +213,16 @@
                     <div id="heartbeat-status">Iniciando...</div>
                     <p class="text-muted">Selecione o arquivo Excel e a aba correspondente para iniciar a carga de dados.</p>
                     
+                    <div class="mb-3 template-actions">
+                        <button type="button" class="btn btn-outline-primary btn-sm" id="btnUpdateTemplate">
+                            Atualizar Template
+                        </button>
+                        <span id="templateUpdateInfo">Última atualização: nunca</span>
+                        <a href="/download-template" class="btn btn-outline-secondary btn-sm">
+                            📥 Baixar Template Excel
+                        </a>
+                    </div>
+
                     <form id="uploadForm" onsubmit="return false;">
                         <div class="mb-3">
                             <label for="excelFile" class="form-label">Arquivo Excel (.xlsx)</label>
@@ -261,6 +283,26 @@
 
             <div class="footer-info">
                 <p class="mb-0">© Vestas Wind Systems A/S</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Modal de Erros de Validação -->
+<div class="modal fade" id="validationErrorModal" tabindex="-1" aria-labelledby="validationErrorModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header" style="background-color: var(--vestas-earth-red); color: #ffffff;">
+                <h5 class="modal-title" id="validationErrorModalLabel">⚠️ Erros de Validação — Upload Cancelado</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Fechar"></button>
+            </div>
+            <div class="modal-body">
+                <p class="mb-3"><strong>O upload foi bloqueado porque foram encontrados erros nos dados. Nenhuma linha foi enviada ao SharePoint.</strong></p>
+                <p class="text-muted mb-3">Corrija os erros abaixo e tente novamente:</p>
+                <div id="validationErrorList"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Fechar</button>
             </div>
         </div>
     </div>
@@ -360,10 +402,79 @@
         const spinner = document.querySelector('.spinner-border');
         const statDashboard = document.getElementById('statDashboard');
         const btnCopyLogs = document.getElementById('btnCopyLogs');
+        const btnUpdateTemplate = document.getElementById('btnUpdateTemplate');
+        const templateUpdateInfo = document.getElementById('templateUpdateInfo');
         
         const totalItemsEl = document.getElementById('totalItems');
         const successCountEl = document.getElementById('successCount');
         const errorCountEl = document.getElementById('errorCount');
+
+        const formatDateTime = (isoDate) => {
+            if (!isoDate) {
+                return 'nunca';
+            }
+            const parsed = new Date(isoDate);
+            if (Number.isNaN(parsed.getTime())) {
+                return 'nunca';
+            }
+            return parsed.toLocaleString('pt-BR');
+        };
+
+        const setTemplateUpdateText = (isoDate) => {
+            templateUpdateInfo.textContent = `Última atualização: ${formatDateTime(isoDate)}`;
+        };
+
+        const loadTemplateUpdateStatus = async () => {
+            try {
+                const response = await fetch('/template-update-status');
+                if (!response.ok) {
+                    setTemplateUpdateText(null);
+                    return;
+                }
+                const data = await response.json();
+                setTemplateUpdateText(data.last_updated || null);
+            } catch {
+                setTemplateUpdateText(null);
+            }
+        };
+
+        const updateTemplate = async () => {
+            const originalText = btnUpdateTemplate.textContent;
+            btnUpdateTemplate.disabled = true;
+            btnUpdateTemplate.textContent = 'Atualizando...';
+
+            try {
+                const response = await fetch('/update-template', { method: 'POST' });
+                const data = await response.json();
+
+                if (!response.ok || data.status !== 'success') {
+                    const msg = data?.message || 'Falha ao atualizar template.';
+                    logArea.textContent += `\n[ERRO TEMPLATE] ${msg}\n`;
+                    if (data?.log) {
+                        logArea.textContent += `${data.log}\n`;
+                    }
+                    logArea.scrollTop = logArea.scrollHeight;
+                    alert(msg);
+                    return;
+                }
+
+                setTemplateUpdateText(data.last_updated || null);
+                logArea.textContent += `\n[TEMPLATE] ${data.message}\n`;
+                if (data.log) {
+                    logArea.textContent += `${data.log}\n`;
+                }
+                logArea.scrollTop = logArea.scrollHeight;
+                alert('Template atualizado com sucesso.');
+            } catch (error) {
+                const msg = `Erro ao atualizar template: ${error.message}`;
+                logArea.textContent += `\n[ERRO TEMPLATE] ${msg}\n`;
+                logArea.scrollTop = logArea.scrollHeight;
+                alert(msg);
+            } finally {
+                btnUpdateTemplate.disabled = false;
+                btnUpdateTemplate.textContent = originalText;
+            }
+        };
 
         // Lógica de cópia de logs
         btnCopyLogs.addEventListener('click', () => {
@@ -393,12 +504,27 @@
             errorCountEl.textContent = errors;
         };
 
+        const showValidationErrors = (errorList) => {
+            const listEl = document.getElementById('validationErrorList');
+            listEl.innerHTML = '';
+            const ul = document.createElement('ul');
+            ul.className = 'list-group';
+            errorList.forEach(err => {
+                const li = document.createElement('li');
+                li.className = 'list-group-item list-group-item-danger';
+                li.textContent = err;
+                ul.appendChild(li);
+            });
+            listEl.appendChild(ul);
+            const modal = new bootstrap.Modal(document.getElementById('validationErrorModal'));
+            modal.show();
+        };
+
+
         const handleSubmit = async (event) => {
             event.preventDefault();
-            
             const fileInput = document.getElementById('excelFile');
             const sheetSelect = document.getElementById('sheetName');
-            
             if (!fileInput.files[0]) {
                 alert("Por favor, selecione um arquivo.");
                 return;
@@ -408,29 +534,122 @@
             resetStats();
             btnSubmit.disabled = true;
             spinner.style.display = 'inline-block';
-            btnText.textContent = 'Processando...';
-            logArea.textContent = 'Iniciando processamento...\n';
+            btnText.textContent = 'Validando dados...';
+            logArea.textContent = 'FASE 1: Validando dados antes do upload...\n';
 
             const formData = new FormData();
             formData.append('file', fileInput.files[0]);
             formData.append('sheet', sheetSelect.value);
 
+            let validationResult = null;
+
+            // ============================
+            // FASE 1: VALIDAÇÃO (separada)
+            // ============================
             try {
-                const response = await fetch('/run-script', {
+                logArea.textContent += 'Conectando ao SharePoint e verificando dados...\n';
+
+                // Envia a requisição e processa a resposta em tempo real
+                const validateResponse = await fetch('/validate', {
                     method: 'POST',
                     body: formData
                 });
 
+                // Se a resposta for JSON direto (erro rápido)
+                const contentType = validateResponse.headers.get('content-type') || '';
+                if (contentType.includes('application/json')) {
+                    validationResult = await validateResponse.json();
+                    if (validationResult.log) {
+                        const logLines = validationResult.log.split('\n')
+                            .filter(l => !l.includes('---VALIDATION_JSON'))
+                            .join('\n');
+                        logArea.textContent += logLines + '\n';
+                        logArea.scrollTop = logArea.scrollHeight;
+                    }
+                } else {
+                    // Se for streaming, processa linha a linha
+                    const reader = validateResponse.body.getReader();
+                    const decoder = new TextDecoder('utf-8');
+                    let fullText = '';
+                    let done, value;
+                    while (true) {
+                        ({ done, value } = await reader.read());
+                        if (done) break;
+                        const chunk = decoder.decode(value);
+                        fullText += chunk;
+                        logArea.textContent += chunk;
+                        logArea.scrollTop = logArea.scrollHeight;
+                    }
+                    // Tenta extrair JSON do final do texto
+                    try {
+                        const start = fullText.indexOf('---VALIDATION_JSON_START---');
+                        const end = fullText.indexOf('---VALIDATION_JSON_END---');
+                        if (start !== -1 && end !== -1) {
+                            const jsonStr = fullText.substring(start + 27, end).trim();
+                            validationResult = JSON.parse(jsonStr);
+                        }
+                    } catch {}
+                }
+
+                if (!validationResult) {
+                    logArea.textContent += '\n[ERRO] Não foi possível obter o resultado da validação.\n';
+                    btnSubmit.disabled = false;
+                    spinner.style.display = 'none';
+                    btnText.textContent = 'Iniciar Importação';
+                    return;
+                }
+
+                if (validationResult.status !== 'success') {
+                    // VALIDAÇÃO FALHOU — mostrar popup e BLOQUEAR upload
+                    const errorList = validationResult.errors || ['Erro desconhecido na validação.'];
+                    logArea.textContent += '\n❌ VALIDAÇÃO FALHOU — Upload BLOQUEADO.\n';
+                    logArea.textContent += `${errorList.length} erro(s) encontrado(s).\n`;
+                    showValidationErrors(errorList);
+                    btnSubmit.disabled = false;
+                    spinner.style.display = 'none';
+                    btnText.textContent = 'Iniciar Importação';
+                    return; // IMPEDE o upload
+                }
+
+                // VALIDAÇÃO OK — prosseguir para upload
+                logArea.textContent += '\n✅ Validação concluída com sucesso!\n';
+                logArea.textContent += `${validationResult.total_lines} linha(s) validada(s).\n`;
+                logArea.textContent += '\n' + '='.repeat(40) + '\n';
+                logArea.textContent += 'FASE 2: Enviando dados ao SharePoint...\n';
+                logArea.textContent += '='.repeat(40) + '\n\n';
+                logArea.scrollTop = logArea.scrollHeight;
+
+            } catch (error) {
+                logArea.textContent += `\n[ERRO CRÍTICO NA VALIDAÇÃO]: ${error.message}\n`;
+                btnSubmit.disabled = false;
+                spinner.style.display = 'none';
+                btnText.textContent = 'Iniciar Importação';
+                return; // IMPEDE o upload
+            }
+
+            // ============================
+            // FASE 2: UPLOAD (só chega aqui se validação passou)
+            // ============================
+            btnText.textContent = 'Enviando ao SharePoint...';
+
+            try {
+                const response = await fetch('/run-script', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        filename: validationResult.filename,
+                        sheet: sheetSelect.value
+                    })
+                });
+
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
-                let accumulatedText = "";
 
                 while (true) {
                     const { done, value } = await reader.read();
                     if (done) break;
                     
                     const chunk = decoder.decode(value);
-                    accumulatedText += chunk;
                     
                     // Detectar resultados nas linhas
                     if (chunk.includes("--- RESULT: SUCCESS ---")) {
@@ -455,7 +674,7 @@
                 }
 
             } catch (error) {
-                logArea.textContent += `\n[ERRO CRÍTICO]: ${error.message}`;
+                logArea.textContent += `\n[ERRO CRÍTICO NO UPLOAD]: ${error.message}`;
             } finally {
                 btnSubmit.disabled = false;
                 spinner.style.display = 'none';
@@ -465,6 +684,8 @@
 
         btnSubmit.addEventListener('click', handleSubmit);
         form?.addEventListener('submit', handleSubmit);
+        btnUpdateTemplate?.addEventListener('click', updateTemplate);
+        loadTemplateUpdateStatus();
     });
 </script>
 

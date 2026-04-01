@@ -1,28 +1,169 @@
 import os
 import subprocess
 import sys
-from flask import Flask, render_template, request, Response, stream_with_context, jsonify
+from flask import Flask, render_template, request, Response, stream_with_context, jsonify, send_from_directory
 from werkzeug.utils import secure_filename
 from datetime import datetime, timedelta
 import json
+import re
 import threading
 import time
 
 app = Flask(__name__)
+app.json.ensure_ascii = False
 
 # Configurações
-UPLOAD_FOLDER = 'uploads'
+UPLOAD_FOLDER = 'templates'
 ALLOWED_EXTENSIONS = {'xlsx'}
 
 # Sistema de Heartbeat
 ACTIVE_SESSIONS = {}  # {session_id: {timestamp, last_heartbeat, user_agent}}
-HEARTBEAT_TIMEOUT = 4  # 4 segundos (2s intervalo + 2s de margem)
+HEARTBEAT_TIMEOUT = 25  # 25 segundos (2s intervalo + 2s de margem)
 SESSIONS_EVER_EXISTED = False  # Flag para rastrear se houve alguma sessão
+ACTIVE_JOBS = 0
+JOBS_LOCK = threading.Lock()
 
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+TEMPLATE_FILENAME = 'ModeloSolicitacaoMob.xlsx'
+TEMPLATE_STATUS_FILE = os.path.join('templates', 'template_update_status.json')
+
+
+def start_job():
+    global ACTIVE_JOBS
+    with JOBS_LOCK:
+        ACTIVE_JOBS += 1
+
+
+def end_job():
+    global ACTIVE_JOBS
+    with JOBS_LOCK:
+        if ACTIVE_JOBS > 0:
+            ACTIVE_JOBS -= 1
+
+
+def build_powershell_command(script_path, file_path, sheet_name):
+    """Executa scripts PowerShell com stdout em UTF-8 para preservar acentuação."""
+    utf8_preamble = (
+        "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false); "
+        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+        "$OutputEncoding = [Console]::OutputEncoding; "
+        "chcp 65001 > $null; "
+    )
+    escaped_script_path = script_path.replace("'", "''")
+    escaped_file_path = file_path.replace("'", "''")
+    escaped_sheet_name = sheet_name.replace("'", "''")
+
+    return [
+        "powershell.exe",
+        "-ExecutionPolicy", "Bypass",
+        "-NoProfile",
+        "-Command",
+        (
+            f"{utf8_preamble}& '{escaped_script_path}' "
+            f"-ExcelPath '{escaped_file_path}' -SheetName '{escaped_sheet_name}'"
+        )
+    ]
+
+
+def build_powershell_template_update_command(script_path, template_path):
+    """Executa script PowerShell de atualização do template com stdout em UTF-8."""
+    utf8_preamble = (
+        "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false); "
+        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+        "$OutputEncoding = [Console]::OutputEncoding; "
+        "chcp 65001 > $null; "
+    )
+    escaped_script_path = script_path.replace("'", "''")
+    escaped_template_path = template_path.replace("'", "''")
+
+    return [
+        "powershell.exe",
+        "-ExecutionPolicy", "Bypass",
+        "-NoProfile",
+        "-Command",
+        (
+            f"{utf8_preamble}& '{escaped_script_path}' "
+            f"-TemplatePath '{escaped_template_path}'"
+        )
+    ]
+
+
+def get_template_status():
+    if not os.path.exists(TEMPLATE_STATUS_FILE):
+        return {'last_updated': None}
+
+    try:
+        with open(TEMPLATE_STATUS_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            return {'last_updated': data.get('last_updated')}
+    except Exception:
+        return {'last_updated': None}
+
+
+def save_template_status(iso_datetime):
+    payload = {'last_updated': iso_datetime}
+    with open(TEMPLATE_STATUS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def decode_powershell_output(raw_output):
+    """Decodifica stdout do Windows PowerShell 5.1 preservando acentuação."""
+    utf8_text = raw_output.decode('utf-8', errors='replace')
+    cp1252_text = raw_output.decode('cp1252', errors='replace')
+    repaired_cp1252 = repair_mojibake(cp1252_text)
+
+    utf8_score = score_decoded_text(utf8_text)
+    repaired_cp1252_score = score_decoded_text(repaired_cp1252)
+
+    if repaired_cp1252_score < utf8_score:
+        return repaired_cp1252
+    return utf8_text
+
+
+def repair_mojibake(text):
+    """Corrige trechos UTF-8 lidos como cp1252 sem afetar texto já correto."""
+    previous_text = text
+    for _ in range(3):
+        repaired_text = repair_mojibake_once(previous_text)
+        if score_decoded_text(repaired_text) >= score_decoded_text(previous_text):
+            return previous_text
+        previous_text = repaired_text
+    return previous_text
+
+
+def repair_mojibake_once(text):
+    parts = re.split(r'(\s+)', text)
+    repaired_parts = []
+    for part in parts:
+        if not part or part.isspace() or not has_mojibake_markers(part):
+            repaired_parts.append(part)
+            continue
+
+        try:
+            repaired_candidate = part.encode('cp1252', errors='strict').decode('utf-8', errors='strict')
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            repaired_parts.append(part)
+            continue
+
+        if score_decoded_text(repaired_candidate) <= score_decoded_text(part):
+            repaired_parts.append(repaired_candidate)
+        else:
+            repaired_parts.append(part)
+
+    return ''.join(repaired_parts)
+
+
+def has_mojibake_markers(text):
+    return any(marker in text for marker in ('Ã', 'Â', 'â'))
+
+
+def score_decoded_text(text):
+    replacement_penalty = text.count('�') * 10
+    mojibake_penalty = sum(text.count(marker) for marker in ('Ã', 'Â', 'â')) * 6
+    return replacement_penalty + mojibake_penalty
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -43,6 +184,10 @@ def check_and_shutdown_if_needed():
     if len(ACTIVE_SESSIONS) > 0:
         print(f"[{now.strftime('%H:%M:%S')}] Heartbeat OK - {len(ACTIVE_SESSIONS)} sessões ativas.")
     
+    # Não encerra o servidor enquanto houver jobs ativos (validação/upload em andamento)
+    if ACTIVE_JOBS > 0:
+        return
+
     # Se já houve sessões registradas e agora não há nenhuma, encerra o servidor
     if SESSIONS_EVER_EXISTED and len(ACTIVE_SESSIONS) == 0:
         print(f"\n[{now.strftime('%H:%M:%S')}] Sem sessões ativas (Navegador fechado) - Encerrando servidor em 1s...\n")
@@ -62,6 +207,64 @@ def inactivity_monitor():
 @app.route('/')
 def index():
     return render_template('index.html')
+
+@app.route('/download-template')
+def download_template():
+    return send_from_directory(app.config['UPLOAD_FOLDER'], TEMPLATE_FILENAME, as_attachment=True)
+
+
+@app.route('/template-update-status', methods=['GET'])
+def template_update_status():
+    return jsonify(get_template_status()), 200
+
+
+@app.route('/update-template', methods=['POST'])
+def update_template():
+    start_job()
+    try:
+        template_path = os.path.abspath(os.path.join(app.config['UPLOAD_FOLDER'], TEMPLATE_FILENAME))
+        if not os.path.exists(template_path):
+            return jsonify({'status': 'error', 'message': 'Template não encontrado.'}), 404
+
+        script_path = os.path.abspath('Update-ExcelTemplateChoices.ps1')
+        if not os.path.exists(script_path):
+            return jsonify({'status': 'error', 'message': 'Script de atualização não encontrado.'}), 500
+
+        cmd = build_powershell_template_update_command(script_path, template_path)
+
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            universal_newlines=False
+        )
+        raw_output = process.communicate()[0]
+        process.wait()
+        full_output = decode_powershell_output(raw_output)
+
+        if process.returncode != 0:
+            return jsonify({
+                'status': 'error',
+                'message': 'Falha ao atualizar template.',
+                'log': full_output
+            }), 500
+
+        updated_at = datetime.now().isoformat()
+        save_template_status(updated_at)
+
+        return jsonify({
+            'status': 'success',
+            'message': 'Template atualizado com sucesso.',
+            'last_updated': updated_at,
+            'log': full_output
+        }), 200
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Erro ao atualizar template: {str(e)}'
+        }), 500
+    finally:
+        end_job()
 
 @app.route('/heartbeat', methods=['POST'])
 def heartbeat():
@@ -151,32 +354,97 @@ def active_count():
         'server_time': datetime.now().isoformat()
     }), 200
 
+@app.route('/validate', methods=['POST'])
+def validate():
+    """Fase 1: Executa validação separada antes do upload"""
+    start_job()
+    try:
+        file = request.files.get('file')
+        sheet_name = request.form.get('sheet', 'PESSOAS')
+        sheet_name = (sheet_name or 'PESSOAS').strip() or 'PESSOAS'
+
+        if not file or not allowed_file(file.filename):
+            return jsonify({'status': 'error', 'errors': ['Arquivo inválido ou não enviado.']}), 400
+
+        filename = secure_filename(file.filename)
+        if not filename:
+            return jsonify({'status': 'error', 'errors': ['Nome de arquivo inválido.']}), 400
+
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file.save(file_path)
+
+        script_path = os.path.abspath("Validate-ExcelData.ps1")
+        cmd = build_powershell_command(script_path, file_path, sheet_name)
+
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            universal_newlines=False
+        )
+        raw_output = process.communicate()[0]
+        process.wait()
+        full_output = decode_powershell_output(raw_output)
+
+        # Extrair JSON de validação da saída
+        start_marker = '---VALIDATION_JSON_START---'
+        end_marker = '---VALIDATION_JSON_END---'
+        
+        if start_marker in full_output and end_marker in full_output:
+            start_idx = full_output.index(start_marker) + len(start_marker)
+            end_idx = full_output.index(end_marker)
+            json_str = full_output[start_idx:end_idx].strip()
+            result = json.loads(json_str)
+            
+            # Adicionar log da validação para debug
+            result['log'] = full_output
+            
+            # Incluir filename para a fase 2 reutilizar
+            result['filename'] = filename
+            return jsonify(result), 200
+        else:
+            return jsonify({
+                'status': 'error',
+                'errors': ['Não foi possível obter resultado da validação.'],
+                'log': full_output,
+                'filename': filename
+            }), 200
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'errors': [f'Erro ao executar validação: {str(e)}']
+        }), 500
+    finally:
+        end_job()
+
+
 @app.route('/run-script', methods=['POST'])
 def run_script():
-    file = request.files.get('file')
-    sheet_name = request.form.get('sheet', 'PESSOAS')
+    """Fase 2: Upload para SharePoint (usa o arquivo já salvo pela validação)"""
+    data = request.get_json()
+    if not data:
+        return Response("Erro: Dados não enviados.", status=400)
 
-    if not file or not allowed_file(file.filename):
-        return Response("Erro: Arquivo inválido ou não enviado.", status=400)
+    filename = data.get('filename', '')
+    sheet_name = data.get('sheet', 'PESSOAS')
 
-    filename = secure_filename(file.filename)
-    file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-    file.save(file_path)
+    if not filename or not allowed_file(filename):
+        return Response("Erro: Arquivo inválido.", status=400)
+
+    file_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(filename))
+    if not os.path.exists(file_path):
+        return Response("Erro: Arquivo não encontrado. Execute a validação primeiro.", status=400)
 
     # Caminho absoluto para o script PowerShell
     script_path = os.path.abspath("Populate-SharePointList.ps1")
     
     # Comando para executar o PowerShell
     # -ExecutionPolicy Bypass é crucial para evitar bloqueios
-    cmd = [
-        "powershell.exe",
-        "-ExecutionPolicy", "Bypass",
-        "-File", script_path,
-        "-ExcelPath", file_path,
-        "-SheetName", sheet_name
-    ]
+    cmd = build_powershell_command(script_path, file_path, sheet_name)
 
     def generate():
+        start_job()
         yield f"Arquivo recebido: {filename}\n"
         yield f"Aba selecionada: {sheet_name}\n"
         yield f"Executando script PowerShell...\n{'-'*30}\n"
@@ -187,18 +455,31 @@ def run_script():
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, # Redireciona stderr para stdout
-                text=True,
                 bufsize=1, # Line buffered
-                universal_newlines=True
+                universal_newlines=False
             )
 
+            detected_error_in_output = False
+            error_markers = [
+                "FALHA CRÍTICA",
+                "UPLOAD CANCELADO",
+                "--- RESULT: ERROR ---",
+                "Write-Error",
+                "Erro ao adicionar item",
+            ]
+
             # Lê linha a linha e envia para o navegador
-            for line in process.stdout:
-                yield line
+            while True:
+                chunk = process.stdout.readline()
+                if not chunk:
+                    break
+                decoded = decode_powershell_output(chunk)
+                if any(marker in decoded for marker in error_markers):
+                    detected_error_in_output = True
+                yield decoded
 
             process.wait()
-            
-            if process.returncode == 0:
+            if process.returncode == 0 and not detected_error_in_output:
                 yield f"\n{'-'*30}\n[SUCESSO] Processo finalizado com código 0.\n"
             else:
                 yield f"\n{'-'*30}\n[ERRO] Processo finalizado com código {process.returncode}.\n"
@@ -209,9 +490,9 @@ def run_script():
             # Limpeza (opcional: remover arquivo após uso)
             # if os.path.exists(file_path):
             #     os.remove(file_path)
-            pass
+            end_job()
 
-    return Response(stream_with_context(generate()), mimetype='text/plain')
+    return Response(stream_with_context(generate()), content_type='text/plain; charset=utf-8')
 
 if __name__ == '__main__':
     # Inicia monitor de inatividade em background
@@ -219,4 +500,4 @@ if __name__ == '__main__':
     
     # Roda o servidor acessível localmente
     print("Servidor rodando em http://localhost:5000")
-    app.run(debug=False, host='0.0.0.0', port=5000)
+    app.run(debug=False, host='0.0.0.0', port=5000, threaded=True)
