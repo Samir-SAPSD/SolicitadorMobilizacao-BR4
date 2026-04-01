@@ -8,6 +8,8 @@ import json
 import re
 import threading
 import time
+import math
+import signal
 
 app = Flask(__name__)
 app.json.ensure_ascii = False
@@ -25,6 +27,10 @@ JOBS_LOCK = threading.Lock()
 SHUTDOWN_PENDING = False
 SHUTDOWN_AT = None
 SHUTDOWN_GRACE_SECONDS = 4
+SHUTDOWN_TRIGGERED = False
+SHUTDOWN_REASON = None
+INACTIVITY_TIMEOUT_SECONDS = 60
+LAST_USER_ACTIVITY = datetime.now()
 
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
@@ -49,17 +55,38 @@ def end_job():
 
 def get_shutdown_payload(now=None):
     now = now or datetime.now()
+    inactivity_remaining = max(
+        0,
+        math.ceil(INACTIVITY_TIMEOUT_SECONDS - (now - LAST_USER_ACTIVITY).total_seconds())
+    )
+
     if not SHUTDOWN_PENDING or SHUTDOWN_AT is None:
         return {
             'shutdown_pending': False,
-            'shutdown_in_seconds': None
+            'shutdown_in_seconds': None,
+            'shutdown_reason': None,
+            'inactivity_remaining_seconds': inactivity_remaining
         }
 
-    shutdown_in_seconds = max(0, int((SHUTDOWN_AT - now).total_seconds()))
+    shutdown_in_seconds = max(0, math.ceil((SHUTDOWN_AT - now).total_seconds()))
     return {
         'shutdown_pending': True,
-        'shutdown_in_seconds': shutdown_in_seconds
+        'shutdown_in_seconds': shutdown_in_seconds,
+        'shutdown_reason': SHUTDOWN_REASON,
+        'inactivity_remaining_seconds': inactivity_remaining
     }
+
+
+def terminate_server_process():
+    """Finaliza o servidor de forma confiável no Windows/Linux."""
+    try:
+        os.kill(os.getpid(), getattr(signal, 'SIGTERM', 15))
+    except Exception as e:
+        print(f"Falha ao enviar SIGTERM ({e}). Forçando encerramento.")
+    finally:
+        # Pequena janela para flush de logs antes de encerrar o processo.
+        time.sleep(0.5)
+        os._exit(0)
 
 
 def build_powershell_command(script_path, file_path, sheet_name):
@@ -188,7 +215,7 @@ def allowed_file(filename):
 
 def check_and_shutdown_if_needed():
     """Verifica se deve desligar o servidor"""
-    global SESSIONS_EVER_EXISTED, SHUTDOWN_PENDING, SHUTDOWN_AT
+    global SESSIONS_EVER_EXISTED, SHUTDOWN_PENDING, SHUTDOWN_AT, SHUTDOWN_TRIGGERED, SHUTDOWN_REASON
     
     now = datetime.now()
     
@@ -208,24 +235,70 @@ def check_and_shutdown_if_needed():
 
     # Se uma nova sessão aparecer, cancela desligamento pendente
     if len(ACTIVE_SESSIONS) > 0 and SHUTDOWN_PENDING:
+        if SHUTDOWN_REASON == 'no_sessions':
+            SHUTDOWN_PENDING = False
+            SHUTDOWN_AT = None
+            SHUTDOWN_TRIGGERED = False
+            SHUTDOWN_REASON = None
+            print(f"[{now.strftime('%H:%M:%S')}] Sessão retomada - desligamento cancelado.")
+
+    inactivity_elapsed = (now - LAST_USER_ACTIVITY).total_seconds()
+
+    # Inatividade do usuário também inicia o fluxo de desligamento mesmo com página aberta.
+    if inactivity_elapsed >= INACTIVITY_TIMEOUT_SECONDS:
+        if not SHUTDOWN_PENDING:
+            SHUTDOWN_PENDING = True
+            SHUTDOWN_AT = now + timedelta(seconds=SHUTDOWN_GRACE_SECONDS)
+            SHUTDOWN_REASON = 'inactivity'
+            print(
+                f"\n[{now.strftime('%H:%M:%S')}] Inatividade detectada ({int(inactivity_elapsed)}s) - "
+                f"Encerrando servidor em {SHUTDOWN_GRACE_SECONDS}s...\n"
+            )
+
+        if SHUTDOWN_AT is not None and now >= SHUTDOWN_AT and not SHUTDOWN_TRIGGERED:
+            SHUTDOWN_TRIGGERED = True
+            print(f"[{now.strftime('%H:%M:%S')}] Encerrando servidor por inatividade.")
+            threading.Thread(target=terminate_server_process, daemon=True).start()
+        return
+
+    # Se houve atividade novamente, cancela desligamento pendente por inatividade.
+    if SHUTDOWN_PENDING and SHUTDOWN_REASON == 'inactivity':
         SHUTDOWN_PENDING = False
         SHUTDOWN_AT = None
-        print(f"[{now.strftime('%H:%M:%S')}] Sessão retomada - desligamento cancelado.")
+        SHUTDOWN_TRIGGERED = False
+        SHUTDOWN_REASON = None
+        print(f"[{now.strftime('%H:%M:%S')}] Atividade detectada - desligamento por inatividade cancelado.")
 
     # Se já houve sessões registradas e agora não há nenhuma, encerra o servidor
     if SESSIONS_EVER_EXISTED and len(ACTIVE_SESSIONS) == 0:
         if not SHUTDOWN_PENDING:
             SHUTDOWN_PENDING = True
             SHUTDOWN_AT = now + timedelta(seconds=SHUTDOWN_GRACE_SECONDS)
+            SHUTDOWN_REASON = 'no_sessions'
             print(
                 f"\n[{now.strftime('%H:%M:%S')}] Sem sessões ativas (Navegador fechado) - "
                 f"Encerrando servidor em {SHUTDOWN_GRACE_SECONDS}s...\n"
             )
 
         # Quando o contador chega ao fim, encerra o processo
-        if SHUTDOWN_AT is not None and now >= SHUTDOWN_AT:
+        if SHUTDOWN_AT is not None and now >= SHUTDOWN_AT and not SHUTDOWN_TRIGGERED:
+            SHUTDOWN_TRIGGERED = True
             print(f"[{now.strftime('%H:%M:%S')}] Encerrando servidor agora.")
-            os.kill(os.getpid(), 15)
+            threading.Thread(target=terminate_server_process, daemon=True).start()
+
+
+@app.route('/activity/ping', methods=['POST'])
+def activity_ping():
+    """Registra atividade do usuário para controle de inatividade."""
+    global LAST_USER_ACTIVITY
+    LAST_USER_ACTIVITY = datetime.now()
+    check_and_shutdown_if_needed()
+    response = {
+        'status': 'ok',
+        'server_time': LAST_USER_ACTIVITY.isoformat()
+    }
+    response.update(get_shutdown_payload(LAST_USER_ACTIVITY))
+    return jsonify(response), 200
 
 def inactivity_monitor():
     """Thread em segundo plano que monitora inatividade sem depender de novos heartbeats"""

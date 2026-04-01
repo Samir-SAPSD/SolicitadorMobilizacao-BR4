@@ -85,8 +85,22 @@
             margin-bottom: 20px;
             display: flex;
             align-items: center;
-            gap: 8px;
+            justify-content: space-between;
+            gap: 12px;
             border: 1px solid rgba(25, 115, 110, 0.2);
+        }
+        .heartbeat-left {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            min-width: 0;
+        }
+        .shutdown-countdown {
+            font-size: 0.8rem;
+            font-weight: 500;
+            color: var(--vestas-dark-grey);
+            white-space: nowrap;
+            opacity: 0.9;
         }
         #heartbeat-status::before {
             content: "🫀";
@@ -210,7 +224,10 @@
                     <h4 class="mb-0">Solicitador de Mobilizações</h4>
                 </div>
                 <div class="card-body">
-                    <div id="heartbeat-status">Iniciando...</div>
+                    <div id="heartbeat-status">
+                        <span class="heartbeat-left" id="heartbeatText">Iniciando...</span>
+                        <span class="shutdown-countdown" id="shutdownCountdown">Servidor ativo</span>
+                    </div>
                     <p class="text-muted">Selecione o arquivo Excel e a aba correspondente para iniciar a carga de dados.</p>
                     
                     <div class="mb-3 template-actions">
@@ -332,12 +349,13 @@
 <script>
     // Sistema de Heartbeat para monitorar se a página está aberta
     class PageHeartbeat {
-        constructor(sessionIdPrefix = 'page_session', onShutdownPending = null, onServerOffline = null) {
+        constructor(sessionIdPrefix = 'page_session', onShutdownPending = null, onServerOffline = null, onShutdownCountdown = null) {
             this.sessionId = `${sessionIdPrefix}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
             this.heartbeatInterval = 2000; // 2 segundos conforme solicitado
             this.beatCount = 0;
             this.onShutdownPending = onShutdownPending;
             this.onServerOffline = onServerOffline;
+            this.onShutdownCountdown = onShutdownCountdown;
             this.serverOfflineNotified = false;
             this.shutdownPendingNotified = false;
             this.init();
@@ -395,11 +413,21 @@
                 return;
             }
 
+            const pending = data?.shutdown_pending === true;
+            const remaining = Number(data?.shutdown_in_seconds ?? 0);
+            const inactivityRemaining = Number(data?.inactivity_remaining_seconds ?? 0);
+
+            if (typeof this.onShutdownCountdown === 'function') {
+                this.onShutdownCountdown(pending, pending ? remaining : null, inactivityRemaining);
+            }
+
             if (data?.shutdown_pending && !this.shutdownPendingNotified) {
                 this.shutdownPendingNotified = true;
                 if (typeof this.onShutdownPending === 'function') {
-                    this.onShutdownPending(data.shutdown_in_seconds ?? 0);
+                    this.onShutdownPending(remaining);
                 }
+            } else if (!data?.shutdown_pending) {
+                this.shutdownPendingNotified = false;
             }
         }
 
@@ -408,13 +436,16 @@
                 return;
             }
             this.serverOfflineNotified = true;
+            if (typeof this.onShutdownCountdown === 'function') {
+                this.onShutdownCountdown(true, 0);
+            }
             if (typeof this.onServerOffline === 'function') {
                 this.onServerOffline();
             }
         }
 
         updateStatusDisplay(count, isOnline) {
-            const statusElement = document.getElementById('heartbeat-status');
+            const statusElement = document.getElementById('heartbeatText');
             const badge = document.getElementById('connectionBadge');
             
             if (statusElement) {
@@ -455,6 +486,121 @@
             serverStatusModal.show();
         };
 
+        const shutdownCountdownEl = document.getElementById('shutdownCountdown');
+        let remainingShutdownSeconds = null;
+        let shutdownCountdownTimer = null;
+
+        const renderShutdownCountdown = () => {
+            if (!shutdownCountdownEl) {
+                return;
+            }
+
+            if (remainingShutdownSeconds === null) {
+                shutdownCountdownEl.textContent = 'Servidor ativo';
+                return;
+            }
+
+            const safeSeconds = Math.max(0, Math.floor(remainingShutdownSeconds));
+            shutdownCountdownEl.textContent = `Desliga em ${safeSeconds}s`;
+        };
+
+        const stopShutdownCountdown = () => {
+            if (shutdownCountdownTimer) {
+                clearInterval(shutdownCountdownTimer);
+                shutdownCountdownTimer = null;
+            }
+        };
+
+        const startShutdownCountdown = () => {
+            if (shutdownCountdownTimer) {
+                return;
+            }
+
+            shutdownCountdownTimer = setInterval(() => {
+                if (remainingShutdownSeconds === null) {
+                    stopShutdownCountdown();
+                    return;
+                }
+
+                if (remainingShutdownSeconds > 0) {
+                    remainingShutdownSeconds -= 1;
+                }
+                renderShutdownCountdown();
+            }, 1000);
+        };
+
+        const updateShutdownCountdown = (pending, secondsLeft, inactivitySeconds = null) => {
+            if (!pending) {
+                if (inactivitySeconds !== null && Number.isFinite(Number(inactivitySeconds))) {
+                    remainingShutdownSeconds = Math.max(0, Number(inactivitySeconds));
+                    renderShutdownCountdown();
+                    startShutdownCountdown();
+                    return;
+                }
+
+                remainingShutdownSeconds = null;
+                stopShutdownCountdown();
+                renderShutdownCountdown();
+                return;
+            }
+
+            const serverSeconds = Math.max(0, Number(secondsLeft) || 0);
+
+            if (remainingShutdownSeconds === null) {
+                remainingShutdownSeconds = serverSeconds;
+            } else {
+                // Mantem a contagem sempre regressiva, sem "subir" por jitter de rede.
+                remainingShutdownSeconds = Math.min(remainingShutdownSeconds, serverSeconds);
+            }
+
+            renderShutdownCountdown();
+            startShutdownCountdown();
+        };
+
+        const sendActivityPing = async () => {
+            try {
+                const response = await fetch('/activity/ping', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ts: Date.now() })
+                });
+
+                if (!response.ok) {
+                    return;
+                }
+
+                const data = await response.json();
+                updateShutdownCountdown(
+                    data?.shutdown_pending === true,
+                    Number(data?.shutdown_in_seconds ?? 0),
+                    Number(data?.inactivity_remaining_seconds ?? 0)
+                );
+            } catch {
+                // Mantem silencioso para não poluir UX em caso de falhas temporárias.
+            }
+        };
+
+        let lastActivityPingAt = 0;
+        const activityPingThrottleMs = 3000;
+        const registerUserActivity = () => {
+            const now = Date.now();
+            if (now - lastActivityPingAt < activityPingThrottleMs) {
+                return;
+            }
+            lastActivityPingAt = now;
+            sendActivityPing();
+        };
+
+        ['click', 'keydown', 'mousemove', 'scroll', 'touchstart'].forEach((eventName) => {
+            window.addEventListener(eventName, registerUserActivity, { passive: true });
+        });
+
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) {
+                registerUserActivity();
+            }
+        });
+
         const pageHeartbeat = new PageHeartbeat(
             'page_session',
             (secondsLeft) => {
@@ -462,8 +608,14 @@
             },
             () => {
                 showServerPopup('Servidor foi desligado. Reabra o sistema para iniciar novamente.');
+            },
+            (pending, secondsLeft, inactivitySeconds) => {
+                updateShutdownCountdown(pending, secondsLeft, inactivitySeconds);
             }
         );
+
+        // Marca atividade inicial ao abrir a página.
+        sendActivityPing();
         const logArea = document.getElementById('logArea');
         const form = document.getElementById('uploadForm');
         const btnSubmit = document.getElementById('btnSubmit');
