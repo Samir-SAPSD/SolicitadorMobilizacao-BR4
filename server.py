@@ -22,6 +22,9 @@ HEARTBEAT_TIMEOUT = 25  # 25 segundos (2s intervalo + 2s de margem)
 SESSIONS_EVER_EXISTED = False  # Flag para rastrear se houve alguma sessão
 ACTIVE_JOBS = 0
 JOBS_LOCK = threading.Lock()
+SHUTDOWN_PENDING = False
+SHUTDOWN_AT = None
+SHUTDOWN_GRACE_SECONDS = 4
 
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
@@ -42,6 +45,21 @@ def end_job():
     with JOBS_LOCK:
         if ACTIVE_JOBS > 0:
             ACTIVE_JOBS -= 1
+
+
+def get_shutdown_payload(now=None):
+    now = now or datetime.now()
+    if not SHUTDOWN_PENDING or SHUTDOWN_AT is None:
+        return {
+            'shutdown_pending': False,
+            'shutdown_in_seconds': None
+        }
+
+    shutdown_in_seconds = max(0, int((SHUTDOWN_AT - now).total_seconds()))
+    return {
+        'shutdown_pending': True,
+        'shutdown_in_seconds': shutdown_in_seconds
+    }
 
 
 def build_powershell_command(script_path, file_path, sheet_name):
@@ -170,7 +188,7 @@ def allowed_file(filename):
 
 def check_and_shutdown_if_needed():
     """Verifica se deve desligar o servidor"""
-    global SESSIONS_EVER_EXISTED
+    global SESSIONS_EVER_EXISTED, SHUTDOWN_PENDING, SHUTDOWN_AT
     
     now = datetime.now()
     
@@ -188,11 +206,26 @@ def check_and_shutdown_if_needed():
     if ACTIVE_JOBS > 0:
         return
 
+    # Se uma nova sessão aparecer, cancela desligamento pendente
+    if len(ACTIVE_SESSIONS) > 0 and SHUTDOWN_PENDING:
+        SHUTDOWN_PENDING = False
+        SHUTDOWN_AT = None
+        print(f"[{now.strftime('%H:%M:%S')}] Sessão retomada - desligamento cancelado.")
+
     # Se já houve sessões registradas e agora não há nenhuma, encerra o servidor
     if SESSIONS_EVER_EXISTED and len(ACTIVE_SESSIONS) == 0:
-        print(f"\n[{now.strftime('%H:%M:%S')}] Sem sessões ativas (Navegador fechado) - Encerrando servidor em 1s...\n")
-        # Usar threading para não bloquear a resposta
-        threading.Thread(target=lambda: (time.sleep(1), os.kill(os.getpid(), 15)), daemon=True).start()
+        if not SHUTDOWN_PENDING:
+            SHUTDOWN_PENDING = True
+            SHUTDOWN_AT = now + timedelta(seconds=SHUTDOWN_GRACE_SECONDS)
+            print(
+                f"\n[{now.strftime('%H:%M:%S')}] Sem sessões ativas (Navegador fechado) - "
+                f"Encerrando servidor em {SHUTDOWN_GRACE_SECONDS}s...\n"
+            )
+
+        # Quando o contador chega ao fim, encerra o processo
+        if SHUTDOWN_AT is not None and now >= SHUTDOWN_AT:
+            print(f"[{now.strftime('%H:%M:%S')}] Encerrando servidor agora.")
+            os.kill(os.getpid(), 15)
 
 def inactivity_monitor():
     """Thread em segundo plano que monitora inatividade sem depender de novos heartbeats"""
@@ -289,12 +322,15 @@ def heartbeat():
         
         # Verifica se deve encerrar (se há sessões expiradas)
         check_and_shutdown_if_needed()
-        
-        return jsonify({
+
+        response = {
             'status': 'ok',
             'server_time': datetime.now().isoformat(),
             'active_sessions': len(ACTIVE_SESSIONS)
-        }), 200
+        }
+        response.update(get_shutdown_payload())
+
+        return jsonify(response), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -349,10 +385,14 @@ def active_count():
         if (now - session_data['last_heartbeat']).total_seconds() > HEARTBEAT_TIMEOUT:
             del ACTIVE_SESSIONS[session_id]
     
-    return jsonify({
+    now = datetime.now()
+    response = {
         'active_count': len(ACTIVE_SESSIONS),
-        'server_time': datetime.now().isoformat()
-    }), 200
+        'server_time': now.isoformat()
+    }
+    response.update(get_shutdown_payload(now))
+
+    return jsonify(response), 200
 
 @app.route('/validate', methods=['POST'])
 def validate():

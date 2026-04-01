@@ -308,16 +308,38 @@
     </div>
 </div>
 
+<!-- Modal de Status do Servidor -->
+<div class="modal fade" id="serverStatusModal" tabindex="-1" aria-labelledby="serverStatusModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header" style="background-color: var(--vestas-night-sky); color: #ffffff;">
+                <h5 class="modal-title" id="serverStatusModalLabel">Status do Servidor</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Fechar"></button>
+            </div>
+            <div class="modal-body" id="serverStatusModalBody">
+                Verificando status do servidor...
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Fechar</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Bootstrap JS Bundle -->
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 
 <script>
     // Sistema de Heartbeat para monitorar se a página está aberta
     class PageHeartbeat {
-        constructor(sessionIdPrefix = 'page_session') {
+        constructor(sessionIdPrefix = 'page_session', onShutdownPending = null, onServerOffline = null) {
             this.sessionId = `${sessionIdPrefix}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
             this.heartbeatInterval = 2000; // 2 segundos conforme solicitado
             this.beatCount = 0;
+            this.onShutdownPending = onShutdownPending;
+            this.onServerOffline = onServerOffline;
+            this.serverOfflineNotified = false;
+            this.shutdownPendingNotified = false;
             this.init();
         }
 
@@ -341,11 +363,14 @@
                     const data = await response.json();
                     this.beatCount++;
                     this.updateStatusDisplay(data.active_sessions, true);
+                    this.handleShutdownSignals(data);
                 } else {
                     this.updateStatusDisplay(0, false);
+                    this.notifyServerOffline();
                 }
             } catch (error) {
                 this.updateStatusDisplay(0, false);
+                this.notifyServerOffline();
             }
         }
 
@@ -355,9 +380,36 @@
                 if (response.ok) {
                     const data = await response.json();
                     this.updateStatusDisplay(data.active_count, true);
+                    this.handleShutdownSignals(data);
+                } else {
+                    this.notifyServerOffline();
                 }
             } catch (error) {
                 this.updateStatusDisplay(0, false);
+                this.notifyServerOffline();
+            }
+        }
+
+        handleShutdownSignals(data) {
+            if (this.serverOfflineNotified) {
+                return;
+            }
+
+            if (data?.shutdown_pending && !this.shutdownPendingNotified) {
+                this.shutdownPendingNotified = true;
+                if (typeof this.onShutdownPending === 'function') {
+                    this.onShutdownPending(data.shutdown_in_seconds ?? 0);
+                }
+            }
+        }
+
+        notifyServerOffline() {
+            if (this.serverOfflineNotified) {
+                return;
+            }
+            this.serverOfflineNotified = true;
+            if (typeof this.onServerOffline === 'function') {
+                this.onServerOffline();
             }
         }
 
@@ -394,7 +446,24 @@
     }
 
     document.addEventListener('DOMContentLoaded', () => {
-        const pageHeartbeat = new PageHeartbeat();
+        const serverStatusModalEl = document.getElementById('serverStatusModal');
+        const serverStatusModalBody = document.getElementById('serverStatusModalBody');
+        const serverStatusModal = new bootstrap.Modal(serverStatusModalEl);
+
+        const showServerPopup = (message) => {
+            serverStatusModalBody.textContent = message;
+            serverStatusModal.show();
+        };
+
+        const pageHeartbeat = new PageHeartbeat(
+            'page_session',
+            (secondsLeft) => {
+                showServerPopup(`Servidor será desligado em instantes (${secondsLeft}s).`);
+            },
+            () => {
+                showServerPopup('Servidor foi desligado. Reabra o sistema para iniciar novamente.');
+            }
+        );
         const logArea = document.getElementById('logArea');
         const form = document.getElementById('uploadForm');
         const btnSubmit = document.getElementById('btnSubmit');
