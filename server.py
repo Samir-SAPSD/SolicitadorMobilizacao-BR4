@@ -406,12 +406,28 @@ def validate():
         if not file or not allowed_file(file.filename):
             return jsonify({'status': 'error', 'errors': ['Arquivo inválido ou não enviado.']}), 400
 
+        # Bloqueia template vazio para evitar validação/upload sem conteúdo.
+        try:
+            file.stream.seek(0, os.SEEK_END)
+            uploaded_size = file.stream.tell()
+            file.stream.seek(0)
+        except Exception:
+            uploaded_size = None
+
+        if uploaded_size == 0:
+            return jsonify({'status': 'error', 'errors': ['O arquivo enviado está vazio.']}), 400
+
         filename = secure_filename(file.filename)
         if not filename:
             return jsonify({'status': 'error', 'errors': ['Nome de arquivo inválido.']}), 400
 
         file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(file_path)
+
+        if os.path.getsize(file_path) == 0:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            return jsonify({'status': 'error', 'errors': ['O arquivo enviado está vazio.']}), 400
 
         script_path = os.path.abspath("Validate-ExcelData.ps1")
         cmd = build_powershell_command(script_path, file_path, sheet_name)
@@ -435,6 +451,21 @@ def validate():
             end_idx = full_output.index(end_marker)
             json_str = full_output[start_idx:end_idx].strip()
             result = json.loads(json_str)
+
+            total_lines = result.get('total_lines', 0)
+            try:
+                total_lines = int(total_lines)
+            except (TypeError, ValueError):
+                total_lines = 0
+
+            if total_lines <= 0:
+                return jsonify({
+                    'status': 'error',
+                    'errors': ['Nenhuma linha válida encontrada para importar no SharePoint.'],
+                    'log': full_output,
+                    'filename': filename,
+                    'total_lines': total_lines
+                }), 200
             
             # Adicionar log da validação para debug
             result['log'] = full_output

@@ -680,9 +680,21 @@
                     return; // IMPEDE o upload
                 }
 
+                const totalLines = Number(validationResult.total_lines || 0);
+                if (totalLines <= 0) {
+                    const errorList = ['Nenhuma linha válida encontrada para importar no SharePoint.'];
+                    logArea.textContent += '\n❌ VALIDAÇÃO FALHOU — Upload BLOQUEADO.\n';
+                    logArea.textContent += 'Nenhuma linha válida para importação.\n';
+                    showValidationErrors(errorList);
+                    btnSubmit.disabled = false;
+                    spinner.style.display = 'none';
+                    btnText.textContent = 'Iniciar Importação';
+                    return; // IMPEDE o upload
+                }
+
                 // VALIDAÇÃO OK — prosseguir para upload
                 logArea.textContent += '\n✅ Validação concluída com sucesso!\n';
-                logArea.textContent += `${validationResult.total_lines} linha(s) validada(s).\n`;
+                logArea.textContent += `${totalLines} linha(s) validada(s).\n`;
                 logArea.textContent += '\n' + '='.repeat(40) + '\n';
                 logArea.textContent += 'FASE 2: Enviando dados ao SharePoint...\n';
                 logArea.textContent += '='.repeat(40) + '\n\n';
