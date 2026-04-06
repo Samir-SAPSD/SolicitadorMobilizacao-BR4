@@ -10,6 +10,13 @@ param(
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = [Console]::OutputEncoding
 
+# Importar módulo de regras de Analista Responsável
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$analistRulesPath = Join-Path $scriptDir "Apply-AnalistRules.ps1"
+if (Test-Path $analistRulesPath) {
+    . $analistRulesPath
+}
+
 function Convert-ExcelColumnToIndex {
     param([string]$ColumnLetters)
     $sum = 0
@@ -495,6 +502,24 @@ else {
     exit 1
 }
 
+# === APLICAR REGRAS DE PREENCHIMENTO AUTOMÁTICO DO ANALISTA RESPONSÁVEL ===
+Write-Host ""
+Write-Host "Aplicando Regras de Preenchimento - Analista Responsável" -ForegroundColor Cyan
+
+# Validar se a função Apply-AnalistRules foi carregada
+if (Get-Command -Name Apply-AnalistRules -ErrorAction SilentlyContinue) {
+    try {
+        $ItensParaAdicionar = @(Apply-AnalistRules -Items $ItensParaAdicionar -ParqueLookupListId $ParqueLookupListId -SiteUrl $SiteUrl -DetailedLog)
+        Write-Host "Regras aplicadas com sucesso!" -ForegroundColor Green
+    } catch {
+        Write-Warning "Erro ao aplicar regras de Analista: $_"
+    }
+} else {
+    Write-Warning "Módulo Apply-AnalistRules não disponível. Pulando preenchimento automático do Analista."
+}
+
+Write-Host ""
+
 # Loop para preparar e validar os itens antes do envio (evita envio parcial)
 $ExecutionReport = @()
 $PreparedItems = @()
@@ -619,6 +644,10 @@ for ($rowIndex = 0; $rowIndex -lt $ItensParaAdicionar.Count; $rowIndex++) {
                         $ItemValues[$realColName] = $val
                     }
                 } else {
+                    $normalizedColName = Normalize-TextForCompare -Text $colName
+                    if ($normalizedColName.Contains("ANALISTA") -and $normalizedColName.Contains("RESP")) {
+                        $ItemValues["AnalistaRespons_x00e1_vel"] = $val
+                    }
                     if ($colName -ieq "Title") { $ItemValues["Title"] = $val }
                 }
             }
