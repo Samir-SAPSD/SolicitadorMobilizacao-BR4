@@ -439,11 +439,28 @@ function Get-RowFieldValue {
 function ConvertTo-DateFromExcel {
     param($Value)
     if ($null -eq $Value -or [string]::IsNullOrWhiteSpace("$Value")) { return $null }
+    $ptBR = [System.Globalization.CultureInfo]::new("pt-BR")
     try {
+        # Número = OADate do Excel (independente de locale)
         if ("$Value" -match '^\d+(\.\d+)?$') {
             return [DateTime]::FromOADate([double]$Value)
         } else {
-            return [DateTime]::Parse("$Value")
+            # Forçar parse no formato PT-BR (dd/MM/yyyy), ignorando o locale da máquina
+            $dateFormats = @(
+                "dd/MM/yyyy",
+                "d/M/yyyy",
+                "dd/MM/yyyy HH:mm:ss",
+                "dd/MM/yyyy H:mm:ss",
+                "d/M/yyyy HH:mm:ss"
+            )
+            foreach ($fmt in $dateFormats) {
+                $parsed = [DateTime]::MinValue
+                if ([DateTime]::TryParseExact("$Value", $fmt, $ptBR, [System.Globalization.DateTimeStyles]::None, [ref]$parsed)) {
+                    return $parsed
+                }
+            }
+            # Fallback: Parse explicitamente com cultura pt-BR
+            return [DateTime]::Parse("$Value", $ptBR)
         }
     } catch {
         return $null

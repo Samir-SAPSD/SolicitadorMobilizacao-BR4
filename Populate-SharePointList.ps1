@@ -231,6 +231,130 @@ function Resolve-SharePointDefaultValue {
     }
 }
 
+function Get-DetailedErrorMessage {
+    param(
+        [Parameter(Mandatory = $true)]
+        $ErrorRecord
+    )
+
+    $parts = @()
+
+    if ($null -eq $ErrorRecord) {
+        return "Erro desconhecido (ErrorRecord nulo)."
+    }
+
+    if ($ErrorRecord.Exception -and -not [string]::IsNullOrWhiteSpace("$($ErrorRecord.Exception.Message)")) {
+        $parts += "Mensagem: $($ErrorRecord.Exception.Message)"
+    }
+
+    if ($ErrorRecord.Exception -and $ErrorRecord.Exception.InnerException -and -not [string]::IsNullOrWhiteSpace("$($ErrorRecord.Exception.InnerException.Message)")) {
+        $parts += "InnerException: $($ErrorRecord.Exception.InnerException.Message)"
+    }
+
+    if ($ErrorRecord.ErrorDetails -and -not [string]::IsNullOrWhiteSpace("$($ErrorRecord.ErrorDetails.Message)")) {
+        $parts += "ErrorDetails: $($ErrorRecord.ErrorDetails.Message)"
+    }
+
+    if ($ErrorRecord.ScriptStackTrace -and -not [string]::IsNullOrWhiteSpace("$($ErrorRecord.ScriptStackTrace)")) {
+        $parts += "ScriptStackTrace: $($ErrorRecord.ScriptStackTrace)"
+    }
+
+    if ($ErrorRecord.Exception) {
+        foreach ($propName in @("ServerErrorTypeName", "ServerErrorCode", "ServerErrorValue")) {
+            $prop = $ErrorRecord.Exception.PSObject.Properties[$propName]
+            if ($prop -and -not [string]::IsNullOrWhiteSpace("$($prop.Value)")) {
+                $parts += "${propName}: $($prop.Value)"
+            }
+        }
+    }
+
+    if ($parts.Count -eq 0) {
+        return "Erro sem detalhes adicionais no ErrorRecord."
+    }
+
+    return ($parts -join " | ")
+}
+
+function Test-SharePointFieldValueCompatibility {
+    param(
+        [Parameter(Mandatory = $true)]
+        $Field,
+        [Parameter(Mandatory = $true)]
+        $Value
+    )
+
+    $errors = @()
+    $fieldType = "$($Field.TypeAsString)"
+
+    if ($Field.ReadOnlyField -eq $true) {
+        $errors += "campo somente leitura"
+        return $errors
+    }
+
+    if ($Field.Hidden -eq $true) {
+        $errors += "campo oculto"
+        return $errors
+    }
+
+    if ($null -eq $Value -or [string]::IsNullOrWhiteSpace("$Value")) {
+        return $errors
+    }
+
+    if ($fieldType -eq "DateTime") {
+        if ($Value -isnot [DateTime]) {
+            $parsedDate = [DateTime]::MinValue
+            if (-not [DateTime]::TryParse("$Value", [ref]$parsedDate)) {
+                $errors += "valor '$Value' inválido para DateTime"
+            }
+        }
+    }
+    elseif ($fieldType -eq "Number" -or $fieldType -eq "Currency") {
+        $parsedNumber = 0.0
+        if (-not [double]::TryParse("$Value", [ref]$parsedNumber)) {
+            $errors += "valor '$Value' inválido para $fieldType"
+        }
+    }
+    elseif ($fieldType -eq "Boolean") {
+        $allowedBoolean = @("true", "false", "1", "0", "sim", "nao", "não")
+        if ($Value -isnot [bool]) {
+            $valueNorm = "$Value".Trim().ToLowerInvariant()
+            if (-not ($allowedBoolean -contains $valueNorm)) {
+                $errors += "valor '$Value' inválido para Boolean"
+            }
+        }
+    }
+    elseif ($fieldType -eq "Choice") {
+        if ($Field.Choices -and $Field.Choices.Count -gt 0) {
+            $rawValue = "$Value"
+            if (-not ($Field.Choices -contains $rawValue)) {
+                $choicesPreview = ($Field.Choices | Select-Object -First 8) -join ", "
+                $errors += "valor '$rawValue' fora das opções válidas (exemplos: $choicesPreview)"
+            }
+        }
+    }
+    elseif ($fieldType -eq "Lookup") {
+        if (-not ("$Value" -match '^\d+$')) {
+            $errors += "valor '$Value' inválido para Lookup (esperado ID numérico)"
+        }
+    }
+    elseif ($fieldType -eq "LookupMulti") {
+        if ($Value -is [string]) {
+            $parts = ("$Value" -split ';') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+            if ($parts.Count -eq 0) {
+                $errors += "valor '$Value' inválido para LookupMulti"
+            }
+            foreach ($p in $parts) {
+                if ($p -notmatch '^\d+$') {
+                    $errors += "valor '$Value' inválido para LookupMulti (IDs devem ser numéricos)"
+                    break
+                }
+            }
+        }
+    }
+
+    return $errors
+}
+
 # Configurações
 $TestMode = $false # Altere para $false para usar a lista de produção
 $SiteUrl = "https://vestas.sharepoint.com/sites/CC-ControleService-BR"
@@ -349,16 +473,18 @@ $ParqueLookupListId = "678f10f9-8d46-404b-a451-70dfe938a1ee"
 
 try {
     # Obter TODOS os campos para mapear Excel Title -> SharePoint InternalName
-    $AllFields = Get-PnPField -List $ListId | Select-Object InternalName, Title, TypeAsString, LookupList, LookupField, Required, DefaultValue
+    $AllFields = Get-PnPField -List $ListId | Select-Object InternalName, Title, TypeAsString, LookupList, LookupField, Required, DefaultValue, ReadOnlyField, Hidden, Choices
     $LookupFields = $AllFields | Where-Object { $_.TypeAsString -eq "Lookup" }
     $LookupCache = @{} # Cache: "FieldName:Value" -> ID
     $LookupDatasetCache = @{} # Cache: "ListId|Field" -> Itens da lista de lookup
     $LookupExactIndexCache = @{} # Cache: "ListId|Field" -> Hashtable(normalizedValue -> Id)
     $FieldMap = @{} # Cache: lower(title|internalname) -> FieldInfo
+    $FieldByInternalName = @{} # Cache: internalname -> FieldInfo
 
     foreach ($f in $AllFields) {
         if (-not [string]::IsNullOrWhiteSpace("$($f.InternalName)")) {
             $FieldMap[$f.InternalName.ToLowerInvariant()] = $f
+            $FieldByInternalName[$f.InternalName] = $f
         }
         if (-not [string]::IsNullOrWhiteSpace("$($f.Title)")) {
             $FieldMap[$f.Title.ToLowerInvariant()] = $f
@@ -555,6 +681,10 @@ for ($rowIndex = 0; $rowIndex -lt $ItensParaAdicionar.Count; $rowIndex++) {
                 if ($fieldInfo) {
                     $realColName = $fieldInfo.InternalName
 
+                    if ($fieldInfo.ReadOnlyField -eq $true -or $fieldInfo.Hidden -eq $true) {
+                        continue
+                    }
+
                     # 2. Se for Lookup, resolve o ID
                     if ($fieldInfo.TypeAsString -match "Lookup") {
                         if ($val -match '^\d+$') {
@@ -705,6 +835,23 @@ for ($rowIndex = 0; $rowIndex -lt $ItensParaAdicionar.Count; $rowIndex++) {
             continue
         }
 
+        # Validação de compatibilidade de tipo antes do Add-PnPListItem
+        $rowTypeErrors = @()
+        foreach ($key in $ItemValues.Keys) {
+            if ($FieldByInternalName.ContainsKey($key)) {
+                $fieldDef = $FieldByInternalName[$key]
+                $compatErrors = @(Test-SharePointFieldValueCompatibility -Field $fieldDef -Value $ItemValues[$key])
+                foreach ($ce in $compatErrors) {
+                    $rowTypeErrors += "Campo '$key': $ce"
+                }
+            }
+        }
+
+        if ($rowTypeErrors.Count -gt 0) {
+            $BlockingErrors += "Linha ${lineNum}: incompatibilidade de tipo detectada: $($rowTypeErrors -join ' | ')"
+            continue
+        }
+
         $PreparedItems += [PSCustomObject]@{
             LinhaExcel = $lineNum
             Values = $ItemValues
@@ -758,8 +905,11 @@ foreach ($prepared in $PreparedItems) {
     }
     catch {
         Write-Host ' [ERRO]' -ForegroundColor Red
-        $errorDetail = $_.Exception.Message
-        Write-Error "Erro ao adicionar item: $errorDetail"
+        $errorDetail = Get-DetailedErrorMessage -ErrorRecord $_
+        $payloadPreview = ($ItemValues.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Key)='$($_.Value)'" }) -join "; "
+        Write-Error "Erro ao adicionar item (linha $($prepared.LinhaExcel)): $errorDetail"
+        Write-Host "Campos enviados: $($ItemValues.Keys -join ', ')" -ForegroundColor DarkYellow
+        Write-Host "Payload: $payloadPreview" -ForegroundColor DarkYellow
         Write-Host '--- RESULT: ERROR ---' -ForegroundColor Gray
 
         # Adiciona ao relatório de erro
