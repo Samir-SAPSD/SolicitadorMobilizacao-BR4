@@ -1,6 +1,9 @@
 @echo off
 setlocal enabledelayedexpansion
 
+set "PROJECT_ROOT=%~dp0..\.."
+pushd "%PROJECT_ROOT%"
+
 echo --- Localizando Python no Sistema ---
 set "PY_EXE="
 set "PYW_EXE="
@@ -80,10 +83,10 @@ if %ERRORLEVEL% equ 0 (
 echo --- Iniciando Servidor (Modo Silencioso) ---
 
 :: Instala dependencias
-"!PY_EXE!" -m pip install -r requirements.txt --quiet
+"!PY_EXE!" -m pip install -r backend\requirements.txt --quiet
 
 :: Inicia o servidor de forma invisivel usando pythonw
-start "" /b "!PYW_EXE!" server.py
+start "" /b "!PYW_EXE!" -m backend.app
 
 :: Aguarda ate 15 segundos para o servidor ficar pronto
 echo Aguardando servidor iniciar...
@@ -100,4 +103,5 @@ start http://localhost:5000
 echo.
 echo Servidor iniciado! Feche esta janela a qualquer momento.
 timeout /t 3 >nul
+popd
 exit
