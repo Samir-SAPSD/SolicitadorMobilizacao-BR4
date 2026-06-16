@@ -1,6 +1,6 @@
 from flask import Flask
 
-from api.routes import api_bp
+from backend.api.routes import api_bp
 from backend.config import FRONTEND_STATIC_DIR, FRONTEND_TEMPLATES_DIR
 from backend.services import REPORTS_FOLDER, UPLOAD_FOLDER
 

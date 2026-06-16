@@ -27,6 +27,8 @@ const sidebars = {
       items: [
         // Entrada da aplicação
         'files/server',
+        // Pacote backend/api
+        'files/backend-api',
         // Camada API
         'files/routes',
         'files/api-init',

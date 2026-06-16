@@ -9,17 +9,19 @@ title: Arquitetura
 
 O sistema segue uma **Arquitetura em Camadas** (Layered Architecture) com separação clara entre:
 
-1. **Camada de Apresentação / API** (`api/routes.py`) — Recebe requisições HTTP, delega ao domínio
+1. **Camada de Apresentação / API** (`backend/api/routes.py`) — Recebe requisições HTTP, delega ao domínio
 2. **Camada de Domínio / Serviços** (`backend/excel_processor.py`, `encoding_repair.py`, etc.) — Lógica de negócio pura
 3. **Camada de Integração** (`backend/powershell_executor.py` + scripts `.ps1`) — Comunicação com SharePoint
 
-A camada `backend/services.py` funciona como **Facade**, consolidando re-exports de todos os módulos para simplificar as importações em `api/routes.py`.
+A camada `backend/services.py` funciona como **Facade**, consolidando re-exports de todos os módulos para simplificar as importações em `backend/api/routes.py`.
+
+> **Nota de Arquitetura**: O pacote `api/` está deliberadamente aninhado dentro de `backend/`, compondo o mesmo pacote Python (`backend.api`). Isso mantém toda a lógica do servidor em um único pacote instalável, simplifica imports relativos e elimina a necessidade de configuração adicional de `PYTHONPATH`.
 
 ## Diagrama de Componentes
 
 ```mermaid
 graph TD
-    Client[Navegador / Frontend] -->|HTTP| Routes[api/routes.py]
+    Client[Navegador / Frontend] -->|HTTP| Routes[backend/api/routes.py]
     Routes --> Services[backend/services.py\nFacade de re-exports]
     Services --> ExcelProc[backend/excel_processor.py]
     Services --> EncRepair[backend/encoding_repair.py]
@@ -44,7 +46,7 @@ graph TD
 ```mermaid
 sequenceDiagram
     participant Browser
-    participant Flask as api/routes.py
+    participant Flask as backend/api/routes.py
     participant Excel as excel_processor.py
     participant PS as powershell_executor.py
     participant Script as Populate-SharePointList.ps1
@@ -81,7 +83,7 @@ sequenceDiagram
 
 ## Camadas da Aplicação
 
-### Camada de Apresentação (`api/routes.py`)
+### Camada de Apresentação (`backend/api/routes.py`)
 Responsável por:
 - Receber e validar arquivos enviados pelo usuário
 - Orquestrar chamadas aos módulos de domínio
@@ -114,7 +116,8 @@ Cada módulo tem responsabilidade única:
 | Decisão | Alternativa Considerada | Motivação |
 |---|---|---|
 | Scripts PowerShell para integração SharePoint | SDK Python para SharePoint | PnP PowerShell tem autenticação por certificado já configurada e é mais robusto para o ambiente Vestas |
-| `services.py` como Facade de re-exports | Importar diretamente de cada módulo | Simplifica o `import` em `routes.py`; permite refatorar módulos internamente sem alterar `routes.py` |
+| `services.py` como Facade de re-exports | Importar diretamente de cada módulo | Simplifica o `import` em `backend/api/routes.py`; permite refatorar módulos internamente sem alterar `routes.py` |
+| `api/` dentro de `backend/` | `api/` como pacote de nível raiz | Mantém tudo em um único pacote `backend`; facilita distribuição e imports consistentes com `from backend.api.routes import api_bp` |
 | Streaming com `Response(stream_with_context)` | WebSockets ou polling | Mais simples de implementar com Flask puro; adequado para operações de duração moderada |
 | Processamento por GRUPO (não arquivo todo) | Enviar arquivo completo ao PS1 | Permite rollback por grupo: se um falha, os anteriores já foram submetidos; feedback parcial ao usuário |
 | Reparo de mojibake em Python | Forçar encoding no PS1 | Garante compatibilidade com PowerShell 5.1 em máquinas com locale variado |

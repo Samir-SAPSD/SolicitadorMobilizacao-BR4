@@ -3,7 +3,7 @@ sidebar_position: 1
 title: routes.py
 ---
 
-# `api/routes.py`
+# `backend/api/routes.py`
 
 ## Responsabilidade
 
@@ -14,7 +14,7 @@ Este arquivo é a **camada de apresentação** do sistema: recebe requisições 
 ## Localização
 
 ```
-api/routes.py
+backend/api/routes.py
 ```
 
 ## Dependências

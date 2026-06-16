@@ -38,7 +38,7 @@ Os nomes são inversos ao que fazem: `UPLOAD_FOLDER` guarda o template; `REPORTS
 
 ### 3. Ausência de Autenticação nos Endpoints
 
-**Arquivo**: [api/routes.py](./files/routes.md)
+**Arquivo**: [backend/api/routes.py](./files/routes.md)
 
 Nenhum endpoint tem autenticação ou autorização. Qualquer pessoa com acesso à rede que descobrir a URL pode:
 - Baixar o template (`GET /download-template`)
@@ -54,7 +54,7 @@ Nenhum endpoint tem autenticação ou autorização. Qualquer pessoa com acesso 
 
 ### 4. `POST /shutdown` sem Proteção
 
-**Arquivo**: [api/routes.py](./files/routes.md)
+**Arquivo**: [backend/api/routes.py](./files/routes.md)
 
 O endpoint `POST /shutdown` encerra o processo Python completamente. Qualquer usuário na rede pode encerrar o servidor de outros analistas.
 
@@ -72,7 +72,7 @@ def shutdown():
 
 ### 5. Arquivo de Upload não Removido Após Validação
 
-**Arquivo**: [api/routes.py](./files/routes.md) — endpoint `/validate`
+**Arquivo**: [backend/api/routes.py](./files/routes.md) — endpoint `/validate`
 
 O arquivo `.xlsx` enviado pelo usuário é salvo em `UPLOAD_FOLDER` durante a validação, mas **nunca é removido** após o endpoint `/validate` retornar. Somente o endpoint `/run-script` reutiliza o arquivo.
 
@@ -136,7 +136,7 @@ O sistema usa `print()` e strings formatadas via `yield` para logging. Sem loggi
 
 ### 10. Sem Limite de Tamanho de Upload
 
-**Arquivo**: [api/routes.py](./files/routes.md)
+**Arquivo**: [backend/api/routes.py](./files/routes.md)
 
 Não há `MAX_CONTENT_LENGTH` configurado no Flask. Um usuário pode enviar um arquivo Excel de centenas de megabytes, causando consumo excessivo de memória.
 
@@ -215,7 +215,7 @@ Um atacante que comprometesse o CDN poderia injetar JavaScript malicioso. SRI ga
 
 **Arquivo**: [routes.py](./files/routes.md)
 
-O endpoint `POST /apply-corrections` **está implementado** em `api/routes.py` (linha 514). A documentação foi adicionada em [routes.md](./files/routes.md#post-apply-corrections--aplicar-correções-no-excel). O item foi erroneamente classificado como ausente na análise inicial.
+O endpoint `POST /apply-corrections` **está implementado** em `backend/api/routes.py` (linha 514). A documentação foi adicionada em [routes.md](./files/routes.md#post-apply-corrections--aplicar-correções-no-excel). O item foi erroneamente classificado como ausente na análise inicial.
 
 ---
 
@@ -249,11 +249,11 @@ Armazenar JSON no `dataset` do DOM funciona, mas tem limite de tamanho e pode ca
 
 | Prática | Impacto | Módulo |
 |---|---|---|
-| Type hints em funções de `routes.py` | Legibilidade, IDE support | `api/routes.py` |
-| Docstrings em funções de `routes.py` | Manutenção | `api/routes.py` |
+| Type hints em funções de `routes.py` | Legibilidade, IDE support | `backend/api/routes.py` |
+| Docstrings em funções de `routes.py` | Manutenção | `backend/api/routes.py` |
 | Context manager para workbook openpyxl | Resource leak prevention | `excel_processor.py` |
-| Validação de schema do JSON do PS1 | Falha mais clara em mudanças de contrato | `api/routes.py` |
-| Timeout em `subprocess.Popen` | Previne hang indefinido | `api/routes.py` |
+| Validação de schema do JSON do PS1 | Falha mais clara em mudanças de contrato | `backend/api/routes.py` |
+| Timeout em `subprocess.Popen` | Previne hang indefinido | `backend/api/routes.py` |
 | SRI em tags de CDN (Bootstrap) | Segurança contra CDN comprometida | `index.html` |
 | Separar CSS/JS do HTML | Manutenibilidade do frontend | `index.html` |
 

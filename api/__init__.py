@@ -1,1 +1,0 @@
-"""HTTP API layer for the Mobilization request app."""
